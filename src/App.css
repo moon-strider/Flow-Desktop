@@ -566,3 +566,8 @@
     var(--flow-grid-track-w, calc(100vw / var(--flow-grid-columns, 4))) * 0.5625 + 4.5rem
   );
 }
+
+.flow-grid-card[data-retained="true"] {
+  content-visibility: visible;
+  contain-intrinsic-size: none;
+}

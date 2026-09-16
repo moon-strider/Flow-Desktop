@@ -1,8 +1,9 @@
-import { Fragment, memo, useRef, type ReactNode } from 'react';
+import { Fragment, memo, useCallback, useEffect, useRef, type ReactNode } from 'react';
 import type { VideoSummary } from '../../types/video';
 import { VideoCard } from './VideoCard';
 import { SkeletonLoader } from '../ui/SkeletonLoader';
 import { useGridStyle, useResolvedGridColumns } from '../../lib/useGridColumns';
+import { useScrollContainer } from '../../lib/useScrollContainer';
 
 interface VideoGridProps {
   videos?: VideoSummary[];
@@ -46,9 +47,47 @@ function VideoGridComponent({
   hideChannelAvatar,
 }: VideoGridProps) {
   const gridRef = useRef<HTMLDivElement>(null);
+  const scrollContainer = useScrollContainer();
+  const retainedObserverRef = useRef<IntersectionObserver | null>(null);
+  const cardElementsRef = useRef(new Set<HTMLDivElement>());
   const gridStyle = useGridStyle();
   const columns = useResolvedGridColumns(gridRef, gridStyle);
   const gridClass = "flow-grid gap-y-8 pb-8";
+
+  const observeCard = useCallback((node: HTMLDivElement | null) => {
+    if (!node) return;
+    cardElementsRef.current.add(node);
+    if (typeof IntersectionObserver === "undefined") {
+      node.dataset.retained = "true";
+    } else if (node.dataset.retained !== "true") {
+      retainedObserverRef.current?.observe(node);
+    }
+    return () => {
+      cardElementsRef.current.delete(node);
+      retainedObserverRef.current?.unobserve(node);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (typeof IntersectionObserver === "undefined") return;
+    const root = scrollContainer?.current ?? null;
+    const margin = root?.clientHeight || window.innerHeight;
+    const observer = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        (entry.target as HTMLElement).dataset.retained = "true";
+        observer.unobserve(entry.target);
+      }
+    }, { root, rootMargin: `${margin}px 0px`, threshold: 0 });
+    retainedObserverRef.current = observer;
+    for (const node of cardElementsRef.current) {
+      if (node.dataset.retained !== "true") observer.observe(node);
+    }
+    return () => {
+      observer.disconnect();
+      retainedObserverRef.current = null;
+    };
+  }, [scrollContainer]);
 
   /*
     The slot goes after the last card of the first row, whatever the resolved
@@ -78,7 +117,7 @@ function VideoGridComponent({
             past the card's own hover bleed, so the colour wash still has room
             at the peak of its expansion — even at two columns on a wide window.
           */}
-          <div className="flow-grid-card p-2 -m-2">
+          <div ref={observeCard} className="flow-grid-card p-2 -m-2">
             <VideoCard
               video={video}
               onPlay={onPlay}
