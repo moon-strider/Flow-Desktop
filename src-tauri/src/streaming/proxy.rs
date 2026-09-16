@@ -310,13 +310,16 @@ async fn write_status_only(
     status: u16,
     reason: &str,
     body: &str,
+    head_only: bool,
 ) -> std::io::Result<()> {
     let headers = format!(
         "HTTP/1.1 {status} {reason}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n{CORS_HEADERS}Connection: close\r\n\r\n",
         body.len()
     );
     socket.write_all(headers.as_bytes()).await?;
-    socket.write_all(body.as_bytes()).await?;
+    if !head_only {
+        socket.write_all(body.as_bytes()).await?;
+    }
     Ok(())
 }
 
@@ -425,7 +428,7 @@ async fn handle_connection(
     let (head, body_prefix) = match read_request_head(&mut socket).await? {
         Some(value) => value,
         None => {
-            write_status_only(&mut socket, 400, "Bad Request", "Malformed request").await?;
+            write_status_only(&mut socket, 400, "Bad Request", "Malformed request", false).await?;
             return Ok(());
         }
     };
@@ -437,7 +440,14 @@ async fn handle_connection(
     // POST is permitted for the in-page extraction sink (`/ytresult`); media
     // routes ignore the body and behave as GET.
     if method != "GET" && method != "HEAD" && method != "POST" {
-        write_status_only(&mut socket, 405, "Method Not Allowed", "Unsupported method").await?;
+        write_status_only(
+            &mut socket,
+            405,
+            "Method Not Allowed",
+            "Unsupported method",
+            false,
+        )
+        .await?;
         return Ok(());
     }
     let head_only = method == "HEAD";
@@ -445,7 +455,14 @@ async fn handle_connection(
     let request_url = match reqwest::Url::parse(&format!("http://localhost{}", head.target)) {
         Ok(url) => url,
         Err(_) => {
-            write_status_only(&mut socket, 400, "Bad Request", "Bad request target").await?;
+            write_status_only(
+                &mut socket,
+                400,
+                "Bad Request",
+                "Bad request target",
+                head_only,
+            )
+            .await?;
             return Ok(());
         }
     };
@@ -524,7 +541,14 @@ async fn handle_connection(
             .find_map(|(key, value)| (key == "url").then(|| value.into_owned()));
         (token.trim_start_matches('/').to_string(), override_url)
     } else {
-        write_status_only(&mut socket, 404, "Not Found", "Unknown proxy route").await?;
+        write_status_only(
+            &mut socket,
+            404,
+            "Not Found",
+            "Unknown proxy route",
+            head_only,
+        )
+        .await?;
         return Ok(());
     };
 
@@ -536,6 +560,7 @@ async fn handle_connection(
                 404,
                 "Not Found",
                 "Video stream session not found or expired",
+                head_only,
             )
             .await?;
             return Ok(());
@@ -582,25 +607,115 @@ async fn handle_connection(
     .await
 }
 
-// Parse a `bytes=START-END` style range spec into (start, end_inclusive).
-fn parse_range_spec(range: Option<&str>) -> (u64, Option<u64>) {
-    let Some(range) = range else {
-        return (0, None);
-    };
-    let spec = range.split('=').nth(1).unwrap_or(range).trim();
-    let mut parts = spec.split('-');
-    let start = parts
-        .next()
-        .and_then(|s| s.trim().parse::<u64>().ok())
-        .unwrap_or(0);
-    let end = parts.next().and_then(|s| {
-        if s.trim().is_empty() {
-            None
-        } else {
-            s.trim().parse::<u64>().ok()
+#[derive(Clone, Copy)]
+enum ByteRange {
+    Closed { start: u64, end: u64 },
+    Open { start: u64 },
+    Suffix { length: u64 },
+}
+
+impl ByteRange {
+    fn resolve(self, total: u64) -> Option<(u64, u64)> {
+        let last = total.checked_sub(1)?;
+        match self {
+            Self::Closed { start, end } if start < total => Some((start, end.min(last))),
+            Self::Open { start } if start < total => Some((start, last)),
+            Self::Suffix { length } if length > 0 => Some((total.saturating_sub(length), last)),
+            _ => None,
         }
-    });
-    (start, end)
+    }
+
+    fn header_value(self) -> String {
+        match self {
+            Self::Closed { start, end } => format!("bytes={start}-{end}"),
+            Self::Open { start } => format!("bytes={start}-"),
+            Self::Suffix { length } => format!("bytes=-{length}"),
+        }
+    }
+}
+
+fn parse_byte_offset(value: &str) -> Option<u64> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    value.parse().ok()
+}
+
+fn parse_range_spec(range: Option<&str>) -> Option<ByteRange> {
+    let (unit, spec) = range?.trim().split_once('=')?;
+    if !unit.eq_ignore_ascii_case("bytes") {
+        return None;
+    }
+    let (start, end) = spec.split_once('-')?;
+    match (start.is_empty(), end.is_empty()) {
+        (true, false) => Some(ByteRange::Suffix {
+            length: parse_byte_offset(end)?,
+        }),
+        (false, true) => Some(ByteRange::Open {
+            start: parse_byte_offset(start)?,
+        }),
+        (false, false) => {
+            let start = parse_byte_offset(start)?;
+            let end = parse_byte_offset(end)?;
+            (start <= end).then_some(ByteRange::Closed { start, end })
+        }
+        (true, true) => None,
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ResponseRange {
+    start: u64,
+    end: u64,
+    total: u64,
+}
+
+impl ResponseRange {
+    fn length(self) -> u64 {
+        self.end - self.start + 1
+    }
+}
+
+fn parse_content_range(value: &str) -> Option<ResponseRange> {
+    let (unit, spec) = value.split_once(' ')?;
+    if !unit.eq_ignore_ascii_case("bytes") {
+        return None;
+    }
+    let (bounds, total) = spec.split_once('/')?;
+    let (start, end) = bounds.split_once('-')?;
+    let start = parse_byte_offset(start)?;
+    let end = parse_byte_offset(end)?;
+    let total = parse_byte_offset(total)?;
+    (start <= end && end < total).then_some(ResponseRange { start, end, total })
+}
+
+fn resumable_response_range(response: &reqwest::Response) -> Option<ResponseRange> {
+    let headers = response.headers();
+    if headers
+        .get("Content-Encoding")
+        .is_some_and(|value| !value.as_bytes().eq_ignore_ascii_case(b"identity"))
+    {
+        return None;
+    }
+    let length = headers
+        .get("Content-Length")
+        .and_then(|value| value.to_str().ok())
+        .and_then(parse_byte_offset)?;
+    match response.status() {
+        reqwest::StatusCode::OK => Some(ResponseRange {
+            start: 0,
+            end: length.checked_sub(1)?,
+            total: length,
+        }),
+        reqwest::StatusCode::PARTIAL_CONTENT => {
+            let range = headers
+                .get("Content-Range")
+                .and_then(|value| value.to_str().ok())
+                .and_then(parse_content_range)?;
+            (range.length() == length).then_some(range)
+        }
+        _ => None,
+    }
 }
 
 async fn relay_local_file(
@@ -612,36 +727,43 @@ async fn relay_local_file(
 ) -> std::io::Result<()> {
     let mut file = match tokio::fs::File::open(path).await {
         Ok(file) => file,
-        Err(_) => return write_status_only(socket, 404, "Not Found", "Local file not found").await,
+        Err(_) => {
+            return write_status_only(socket, 404, "Not Found", "Local file not found", head_only)
+                .await;
+        }
     };
     let total = match file.metadata().await {
         Ok(meta) => meta.len(),
         Err(_) => {
-            return write_status_only(socket, 500, "Internal Server Error", "Cannot read file")
-                .await;
+            return write_status_only(
+                socket,
+                500,
+                "Internal Server Error",
+                "Cannot read file",
+                head_only,
+            )
+            .await;
         }
     };
 
-    let is_range = client_range.is_some();
-    let (range_start, range_end) = parse_range_spec(client_range);
-
-    if is_range && total > 0 && range_start >= total {
-        let headers = format!(
-            "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */{total}\r\nContent-Length: 0\r\n{CORS_HEADERS}Connection: close\r\n\r\n"
-        );
-        return socket.write_all(headers.as_bytes()).await;
-    }
-
-    let last_byte = total.saturating_sub(1);
-    let start = range_start.min(last_byte);
-    let end_inclusive = range_end.map_or(last_byte, |end| end.min(last_byte));
-    let length = if total == 0 {
-        0
+    let range = if head_only {
+        None
     } else {
-        end_inclusive - start + 1
+        parse_range_spec(client_range)
+    };
+    let (start, end_inclusive, length) = if let Some(range) = range {
+        let Some((start, end)) = range.resolve(total) else {
+            let headers = format!(
+                "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */{total}\r\nContent-Length: 0\r\n{CORS_HEADERS}Connection: close\r\n\r\n"
+            );
+            return socket.write_all(headers.as_bytes()).await;
+        };
+        (start, end, end - start + 1)
+    } else {
+        (0, total.saturating_sub(1), total)
     };
 
-    let (status, reason) = if is_range {
+    let (status, reason) = if range.is_some() {
         (206, "Partial Content")
     } else {
         (200, "OK")
@@ -649,7 +771,7 @@ async fn relay_local_file(
     let mut headers = format!(
         "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {length}\r\nAccept-Ranges: bytes\r\n"
     );
-    if is_range {
+    if range.is_some() {
         headers.push_str(&format!(
             "Content-Range: bytes {start}-{end_inclusive}/{total}\r\n"
         ));
@@ -694,15 +816,15 @@ async fn relay_remote(
     path: &str,
     head_only: bool,
 ) -> std::io::Result<()> {
-    let (range_start, range_end) = parse_range_spec(client_range);
+    let range = if head_only {
+        None
+    } else {
+        parse_range_spec(client_range)
+    };
     // Match the fetch UA to the URL's `c=` client (mobile parity); the target URL
     // is stable across recovery attempts, so resolve it once.
     let upstream_user_agent = user_agent_for_media_url(target_url, &session.user_agent);
-    let range_key = match (range_start, range_end) {
-        (s, Some(e)) => format!("{s}-{e}"),
-        (s, None) if client_range.is_some() => format!("{s}-"),
-        _ => "full".to_string(),
-    };
+    let range_key = range.map_or_else(|| "full".to_string(), ByteRange::header_value);
     let cache_key = format!("{target_url}|{range_key}");
 
     if let Some(cached) = manager.get_cached_response(&cache_key) {
@@ -713,31 +835,44 @@ async fn relay_remote(
     let mut bytes_relayed: u64 = 0;
     let mut attempt: u32 = 0;
     let mut content_length_value: usize = 0;
-    let mut should_cache = false;
     let mut content_type_value = session.content_type.clone();
     let mut content_range_value: Option<String> = None;
     let mut accept_ranges_value = "bytes".to_string();
     let mut status_code_value: u16 = 200;
     let mut reason_value = "OK".to_string();
     let mut cached_body: Option<Vec<u8>> = None;
+    let mut recovery_range: Option<ResponseRange> = None;
+    let mut recovery_url: Option<reqwest::Url> = None;
+    let mut strong_etag: Option<reqwest::header::HeaderValue> = None;
 
     loop {
-        let effective_start = range_start + bytes_relayed;
-        let needs_range = client_range.is_some() || bytes_relayed > 0;
-        let range_header = if needs_range {
-            match range_end {
-                Some(end) => Some(format!("bytes={effective_start}-{end}")),
-                None => Some(format!("bytes={effective_start}-")),
+        let expected_resume = if headers_written {
+            let Some(original) = recovery_range else {
+                break;
+            };
+            let Some(start) = original.start.checked_add(bytes_relayed) else {
+                break;
+            };
+            if start > original.end {
+                break;
             }
+            Some(ResponseRange { start, ..original })
         } else {
             None
         };
+        let range_header = expected_resume.map_or_else(
+            || range.map(ByteRange::header_value),
+            |resume| Some(format!("bytes={}-{}", resume.start, resume.end)),
+        );
 
         let is_image = session.content_type.starts_with("image/");
-        let mut req = client
-            .get(target_url)
-            .header("User-Agent", &upstream_user_agent)
-            .header("Accept-Encoding", "identity");
+        let mut req = if head_only {
+            client.head(target_url)
+        } else {
+            client.get(target_url)
+        }
+        .header("User-Agent", &upstream_user_agent)
+        .header("Accept-Encoding", "identity");
         if is_image {
             req = req
                 .header(
@@ -750,6 +885,11 @@ async fn relay_remote(
         }
         if let Some(rh) = &range_header {
             req = req.header("Range", rh);
+        }
+        if expected_resume.is_some()
+            && let Some(etag) = &strong_etag
+        {
+            req = req.header("If-Range", etag);
         }
 
         // Held for the whole relay so a slot covers the body too, not just the
@@ -773,12 +913,27 @@ async fn relay_remote(
                     502,
                     "Bad Gateway",
                     "Failed to proxy media stream",
+                    head_only,
                 )
                 .await;
             }
         };
 
+        if let Some(expected) = expected_resume
+            && (response.status() != reqwest::StatusCode::PARTIAL_CONTENT
+                || resumable_response_range(&response) != Some(expected)
+                || recovery_url.as_ref() != Some(response.url())
+                || strong_etag
+                    .as_ref()
+                    .is_none_or(|etag| response.headers().get("ETag") != Some(etag)))
+        {
+            warn!("Upstream recovery response did not match the original representation");
+            return Ok(());
+        }
+
         if !headers_written {
+            recovery_range = resumable_response_range(&response);
+            recovery_url = Some(response.url().clone());
             let status = response.status();
             status_code_value = status.as_u16();
             reason_value = status.canonical_reason().unwrap_or("OK").to_string();
@@ -792,6 +947,18 @@ async fn relay_remote(
                 );
             }
             let headers = response.headers();
+            strong_etag = headers
+                .get("ETag")
+                .filter(|value| {
+                    let bytes = value.as_bytes();
+                    bytes.len() >= 2
+                        && bytes.starts_with(b"\"")
+                        && bytes.ends_with(b"\"")
+                        && bytes[1..bytes.len() - 1]
+                            .iter()
+                            .all(|&byte| matches!(byte, b'!' | b'#'..=b'~' | 0x80..=0xff))
+                })
+                .cloned();
             content_type_value = headers
                 .get("Content-Type")
                 .and_then(|h| h.to_str().ok())
@@ -822,15 +989,18 @@ async fn relay_remote(
                 || ct_lower.contains("dash+xml")
                 || ct_lower.contains("application/vnd.apple")
                 || ct_lower.contains("text/vtt");
+            if is_manifest || strong_etag.is_none() {
+                recovery_range = None;
+            }
             let is_cacheable_kind = ct_lower.starts_with("image/");
 
-            should_cache = status.is_success()
+            let should_cache = status.is_success()
                 && !is_manifest
                 && is_cacheable_kind
                 && content_length_header.is_some()
                 && content_length_value > 0
                 && content_length_value <= MAX_CACHED_RESPONSE_BYTES
-                && (client_range.is_some() || path.starts_with("/proxy/"));
+                && (range.is_some() || path.starts_with("/proxy/"));
 
             let mut response_headers = format!(
                 "HTTP/1.1 {} {}\r\nContent-Type: {}\r\n",
@@ -881,7 +1051,7 @@ async fn relay_remote(
                     if socket.write_all(&chunk).await.is_err() {
                         return Ok(());
                     }
-                    bytes_relayed += chunk.len() as u64;
+                    bytes_relayed = bytes_relayed.saturating_add(chunk.len() as u64);
                 }
                 Err(e) => {
                     clean_finish = false;
@@ -897,13 +1067,13 @@ async fn relay_remote(
         if clean_finish {
             break;
         }
+        if recovery_range.is_none_or(|range| bytes_relayed >= range.length()) {
+            break;
+        }
 
         attempt += 1;
         if attempt > MAX_UPSTREAM_RECOVERIES {
             warn!("Giving up upstream recovery after {attempt} attempts");
-            break;
-        }
-        if content_length_value > 0 && bytes_relayed as usize >= content_length_value {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(150 * u64::from(attempt))).await;
@@ -968,7 +1138,7 @@ async fn handle_sabr_route(
     // /sabr/{session}/{...}
     let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
     if segments.len() < 3 {
-        return write_status_only(socket, 404, "Not Found", "Bad SABR route").await;
+        return write_status_only(socket, 404, "Not Found", "Bad SABR route", head_only).await;
     }
     let session_id = segments[1];
 
@@ -976,7 +1146,7 @@ async fn handle_sabr_route(
         Ok(h) => h,
         Err(e) => {
             let (code, reason) = sabr_error_status(&e);
-            return write_status_only(socket, code, reason, &format!("SABR: {e}")).await;
+            return write_status_only(socket, code, reason, &format!("SABR: {e}"), head_only).await;
         }
     };
     let engine = handle.engine.clone();
@@ -1000,8 +1170,14 @@ async fn handle_sabr_route(
                 Err(e) => {
                     let (code, reason) = sabr_error_status(&e);
                     warn!(session = %session_id, error = %e, "sabr_manifest_timeout");
-                    return write_status_only(socket, code, reason, &format!("SABR manifest: {e}"))
-                        .await;
+                    return write_status_only(
+                        socket,
+                        code,
+                        reason,
+                        &format!("SABR manifest: {e}"),
+                        head_only,
+                    )
+                    .await;
                 }
             };
             let base = format!(
@@ -1031,25 +1207,40 @@ async fn handle_sabr_route(
             }
             Err(e) => {
                 let (code, reason) = sabr_error_status(&e);
-                write_status_only(socket, code, reason, &format!("SABR init: {e}")).await
+                write_status_only(socket, code, reason, &format!("SABR init: {e}"), head_only).await
             }
         },
         ["video", "seg", number] => {
             let Ok(sequence) = number.parse::<i32>() else {
-                return write_status_only(socket, 400, "Bad Request", "Bad segment number").await;
+                return write_status_only(
+                    socket,
+                    400,
+                    "Bad Request",
+                    "Bad segment number",
+                    head_only,
+                )
+                .await;
             };
             match engine.get_segment(SabrTrack::Video, sequence).await {
                 Ok(bytes) => write_full_body(socket, video_ct, "no-store", &bytes, head_only).await,
                 Err(e) => {
                     let (code, reason) = sabr_error_status(&e);
                     debug!(session = %session_id, seq = sequence, error = %e, "sabr_segment_unavailable");
-                    write_status_only(socket, code, reason, &format!("SABR seg: {e}")).await
+                    write_status_only(socket, code, reason, &format!("SABR seg: {e}"), head_only)
+                        .await
                 }
             }
         }
         ["audio", key, "init"] => {
             if !engine.set_active_audio(key).await {
-                return write_status_only(socket, 404, "Not Found", "Unknown audio track").await;
+                return write_status_only(
+                    socket,
+                    404,
+                    "Not Found",
+                    "Unknown audio track",
+                    head_only,
+                )
+                .await;
             }
             match engine.get_init(SabrTrack::Audio).await {
                 Ok(bytes) => {
@@ -1064,16 +1255,31 @@ async fn handle_sabr_route(
                 }
                 Err(e) => {
                     let (code, reason) = sabr_error_status(&e);
-                    write_status_only(socket, code, reason, &format!("SABR init: {e}")).await
+                    write_status_only(socket, code, reason, &format!("SABR init: {e}"), head_only)
+                        .await
                 }
             }
         }
         ["audio", key, "seg", number] => {
             if !engine.set_active_audio(key).await {
-                return write_status_only(socket, 404, "Not Found", "Unknown audio track").await;
+                return write_status_only(
+                    socket,
+                    404,
+                    "Not Found",
+                    "Unknown audio track",
+                    head_only,
+                )
+                .await;
             }
             let Ok(sequence) = number.parse::<i32>() else {
-                return write_status_only(socket, 400, "Bad Request", "Bad segment number").await;
+                return write_status_only(
+                    socket,
+                    400,
+                    "Bad Request",
+                    "Bad segment number",
+                    head_only,
+                )
+                .await;
             };
             engine.ensure_audio_segment(sequence).await;
             match engine.get_segment(SabrTrack::Audio, sequence).await {
@@ -1083,7 +1289,8 @@ async fn handle_sabr_route(
                 Err(e) => {
                     let (code, reason) = sabr_error_status(&e);
                     debug!(session = %session_id, key, seq = sequence, error = %e, "sabr_segment_unavailable");
-                    write_status_only(socket, code, reason, &format!("SABR seg: {e}")).await
+                    write_status_only(socket, code, reason, &format!("SABR seg: {e}"), head_only)
+                        .await
                 }
             }
         }
@@ -1099,6 +1306,6 @@ async fn handle_sabr_route(
             )
             .await
         }
-        _ => write_status_only(socket, 404, "Not Found", "Unknown SABR route").await,
+        _ => write_status_only(socket, 404, "Not Found", "Unknown SABR route", head_only).await,
     }
 }
