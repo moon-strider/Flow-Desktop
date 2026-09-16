@@ -34,6 +34,9 @@ pub enum AppError {
     #[error("Content not available: {0}")]
     ContentNotAvailable(String),
 
+    #[error("Live stream is offline: {0}")]
+    LiveStreamOffline(String),
+
     #[error("Database error: {0}")]
     Database(#[from] sqlx::Error),
 
@@ -98,6 +101,7 @@ impl From<AppError> for ErrorResponse {
             AppError::BotCheckRequired(_) => "botCheckRequired",
             AppError::AccountTerminated(_) => "accountTerminated",
             AppError::ContentNotAvailable(_) => "contentNotAvailable",
+            AppError::LiveStreamOffline(_) => "liveStreamOffline",
             AppError::Database(_) => "database",
             AppError::Streaming(_) => "streaming",
             AppError::Internal(_) => "internal",

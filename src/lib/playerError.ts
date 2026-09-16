@@ -79,6 +79,12 @@ const SPECS: Record<string, KindSpec> = {
     retryable: true,
     openable: true,
   },
+  liveStreamOffline: {
+    titleKey: "player_error_live_offline_title",
+    hintKey: "player_error_live_offline_hint",
+    retryable: true,
+    openable: true,
+  },
   extractor: {
     titleKey: "player_error_extractor_title",
     hintKey: "player_error_extractor_hint",

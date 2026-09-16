@@ -391,6 +391,10 @@ fn map_playability_error(playability: &Value) -> AppError {
     let reason_text = combined_playability_reason(playability);
     let normalized_reason = reason_text.to_ascii_lowercase();
 
+    if status.eq_ignore_ascii_case("LIVE_STREAM_OFFLINE") {
+        return AppError::LiveStreamOffline(reason_text);
+    }
+
     if normalized_reason.contains("inappropriate for some users")
         || normalized_reason.contains("confirm your age")
         || normalized_reason.contains("verify your age")
@@ -1338,7 +1342,11 @@ impl InnertubeClient {
                 deferred_restriction,
             )
             .await;
-        if let Some(attempt) = attempt.as_ref() {
+        if let Some(attempt) = attempt.as_ref().filter(|attempt| {
+            attempt.response["playabilityStatus"]["status"]
+                .as_str()
+                .is_some_and(|status| status.eq_ignore_ascii_case("OK"))
+        }) {
             store_player_attempt(video_id, attempt);
         }
         attempt
@@ -1357,6 +1365,7 @@ impl InnertubeClient {
         visitor_data: Option<&str>,
         deferred_restriction: &mut Option<AppError>,
     ) -> Option<PlayerAttempt> {
+        let mut offline_attempt: Option<PlayerAttempt> = None;
         for client in ladder {
             // Only a client whose attestation platform Flow can actually run gets a
             // token. Injecting a BotGuard token into an IOS/ANDROID_VR/VISIONOS
@@ -1410,6 +1419,20 @@ impl InnertubeClient {
                 });
             }
 
+            if status.eq_ignore_ascii_case("LIVE_STREAM_OFFLINE") {
+                if offline_attempt.as_ref().is_none_or(|attempt| {
+                    !attempt.response["videoDetails"].is_object()
+                        && response["videoDetails"].is_object()
+                }) {
+                    offline_attempt = Some(PlayerAttempt {
+                        response,
+                        client,
+                        po_token,
+                    });
+                }
+                continue;
+            }
+
             let mapped = map_playability_error(&response["playabilityStatus"]);
             if is_definitive_restriction(&mapped) {
                 deferred_restriction.get_or_insert(mapped);
@@ -1421,7 +1444,7 @@ impl InnertubeClient {
                 "Player client returned a non-OK status, trying the next one"
             );
         }
-        None
+        offline_attempt
     }
 
     /// One `player` request as `client`, carrying whatever that client's profile
@@ -1509,9 +1532,13 @@ impl InnertubeClient {
             }
         };
 
-        check_playability_status(&res["playabilityStatus"])?;
-
         let details = &res["videoDetails"];
+        let is_offline = res["playabilityStatus"]["status"]
+            .as_str()
+            .is_some_and(|status| status.eq_ignore_ascii_case("LIVE_STREAM_OFFLINE"));
+        if !is_offline || !details.is_object() {
+            check_playability_status(&res["playabilityStatus"])?;
+        }
         if details.is_null() {
             return Err(AppError::Extractor(
                 "Failed to fetch video details from Innertube".into(),

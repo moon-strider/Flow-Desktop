@@ -1183,6 +1183,8 @@
   "player_error_account_terminated_hint": "This channel has been closed or terminated, so its videos can't be played.",
   "player_error_not_available_title": "Content not available",
   "player_error_not_available_hint": "This video may have been deleted, made private, or removed by YouTube. Try again in case it's a temporary hiccup.",
+  "player_error_live_offline_title": "Live stream is offline",
+  "player_error_live_offline_hint": "This broadcast hasn't started yet or is currently offline. Try again when the channel starts streaming.",
   "player_error_extractor_title": "Couldn't read the stream",
   "player_error_extractor_hint": "Flow couldn't parse the playback data — YouTube may have changed its format. Try again, and update Flow if it keeps failing.",
   "player_error_streaming_title": "Playback failed",
