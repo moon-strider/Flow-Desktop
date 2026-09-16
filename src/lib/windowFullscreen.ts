@@ -1,4 +1,5 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { logToBackend } from "./diagnostics";
 
 export interface WindowFullscreenController {
@@ -92,6 +93,11 @@ export async function watchNativeFullscreenExit(
   const appWindow = getCurrentWindow();
 
   return appWindow.onResized(() => {
+    if (isTauri()) {
+      void getCurrentWebview().setFocus().catch((cause) => {
+        void logToBackend("warn", "player webview focus failed", { cause: String(cause) });
+      });
+    }
     if (controller.isTransitioning() || !isFullscreenExpected()) return;
     void appWindow
       .isFullscreen()

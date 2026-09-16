@@ -5,6 +5,7 @@
   "windows": ["pip"],
   "permissions": [
     "core:default",
+    "core:webview:allow-set-webview-focus",
     "core:window:allow-close",
     "core:window:allow-destroy",
     "core:window:allow-minimize",
