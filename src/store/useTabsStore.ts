@@ -1,8 +1,10 @@
 import { create } from "zustand";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { createPath, parsePath, type Location, type To } from "react-router-dom";
 import { createPlayerStore, type PlayerStoreApi, type VideoPlayerMode, type VideoPipIntent } from "./usePlayerStore";
 import type { VideoSummary } from "../types/video";
 import { getString } from "../lib/i18n/index";
+import { logToBackend } from "../lib/diagnostics";
 
 export interface TabPlayback {
   videoId: string | null;
@@ -77,12 +79,20 @@ export const useTabsStore = create<TabsState>((set, get) => ({
     return { activeId: id, tabs: state.tabs.map((item) => item.id === id ? { ...item, visited: true } : item) };
   }),
   closeTab: (id) => {
-    get().tabs.find((tab) => tab.id === id)?.player.getState().clearQueue();
+    const current = get();
+    const closing = current.tabs.find((tab) => tab.id === id);
+    if (!closing) return;
+    if (current.tabs.length === 1) {
+      void getCurrentWindow().close().catch((error) => {
+        void logToBackend("warn", "last tab could not close the window", { cause: String(error) });
+      });
+      return;
+    }
+    closing.player.getState().clearQueue();
     set((state) => {
       const index = state.tabs.findIndex((tab) => tab.id === id);
       if (index < 0) return state;
-      let tabs = state.tabs.filter((tab) => tab.id !== id);
-      if (!tabs.length) tabs = [makeTab("/", true)];
+      const tabs = state.tabs.filter((tab) => tab.id !== id);
       const next = tabs[Math.min(index, tabs.length - 1)]!;
       const activeId = state.activeId === id ? next.id : state.activeId;
       return { tabs: tabs.map((tab) => tab.id === activeId ? { ...tab, visited: true } : tab), activeId,
