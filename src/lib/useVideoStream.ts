@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { usePlayerStore } from "../store/usePlayerStore";
+import { usePlayerStore, usePlayerStoreApi } from "../store/usePlayerStore";
 import { invalidateStreamInfo, resolveStreamInfo } from "./streamResolution";
 import { classifyPlayerError } from "./playerError";
 import { recordPlayerEvent } from "./playerDiagnostics";
@@ -67,14 +67,14 @@ export const clearLocalWatchProgress = (videoId: string) => {
  * progress: it is exact, it carries the paused state the user chose, and it
  * survives Deep Flow, which suppresses the saved-progress write entirely.
  */
-const resolveHandoff = (video: VideoSummary, isLive: boolean) => {
-  const handoff = usePlayerStore.getState().consumePipHandoff(video.id);
+const resolveHandoff = (video: VideoSummary, isLive: boolean, playerStore: ReturnType<typeof usePlayerStoreApi>) => {
+  const handoff = playerStore.getState().consumePipHandoff(video.id);
   if (handoff) {
     return { resumeTime: isLive ? 0 : handoff.positionSeconds, playing: handoff.playing };
   }
   return {
     resumeTime: isLive ? 0 : readSavedWatchProgress(video.id, video.durationSeconds ?? 0),
-    playing: true,
+    playing: playerStore.getState().isPlaying,
   };
 };
 
@@ -176,6 +176,7 @@ export interface VideoStream {
  * store so sibling panels (Chapters/transcript) can read them without prop drilling.
  */
 export function useVideoStream(videoId: string | undefined): VideoStream {
+  const playerStore = usePlayerStoreApi();
   const currentVideo = usePlayerStore((s) => s.currentVideo);
   const setIsPlaying = usePlayerStore((s) => s.setIsPlaying);
   const setCaptionsInStore = usePlayerStore((s) => s.setCaptions);
@@ -255,7 +256,7 @@ export function useVideoStream(videoId: string | undefined): VideoStream {
             streamInfoRef.current = null;
             attemptedModesRef.current = new Set(["direct"]);
             setSelectedQualityId("auto");
-            const offlineHandoff = resolveHandoff(currentVideo, false);
+            const offlineHandoff = resolveHandoff(currentVideo, false, playerStore);
             setResumeTime(offlineHandoff.resumeTime);
             setSourceMode("direct");
             setStreamUrl(offline.url);
@@ -299,7 +300,7 @@ export function useVideoStream(videoId: string | undefined): VideoStream {
         setSelectedQualityId(initialQualityId);
 
         // A live broadcast has no meaningful resume point.
-        const handoff = resolveHandoff(currentVideo, !!info.isLive);
+        const handoff = resolveHandoff(currentVideo, !!info.isLive, playerStore);
         setResumeTime(handoff.resumeTime);
 
         const availableModes = computeAvailableSourceModes(info);
@@ -385,7 +386,7 @@ export function useVideoStream(videoId: string | undefined): VideoStream {
         const canUseAdaptive = audioTracks.some((track) => !!track.localUrl);
         const chosenVariant = selectVariantByBandwidth(streamVariants, canUseAdaptive, preferredCodec);
         if (chosenVariant) {
-          setResumeTime(usePlayerStore.getState().currentTime);
+          setResumeTime(playerStore.getState().currentTime);
           setStreamUrl(chosenVariant.localUrl);
         }
         return;
@@ -399,7 +400,7 @@ export function useVideoStream(videoId: string | undefined): VideoStream {
         setIsPlaying(true);
         return;
       }
-      setResumeTime(usePlayerStore.getState().currentTime);
+      setResumeTime(playerStore.getState().currentTime);
       setSelectedQualityId(variant.id);
       setStreamUrl(variant.localUrl);
       setIsPlaying(true);
@@ -412,7 +413,7 @@ export function useVideoStream(videoId: string | undefined): VideoStream {
       const info = streamInfoRef.current;
       if (!info) return;
       const available = computeAvailableSourceModes(info);
-      const resumeAt = usePlayerStore.getState().currentTime || 0;
+      const resumeAt = playerStore.getState().currentTime || 0;
 
       attemptedModesRef.current.add(sourceMode);
       const next = available.find((mode) => !attemptedModesRef.current.has(mode));

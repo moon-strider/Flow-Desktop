@@ -53,7 +53,7 @@ export function PageWrapper() {
         </main>
       </div>
       {(isWatchPage || isSettingsPage) && isWatchSidebarOpen && (
-        <div className="fixed inset-x-0 bottom-0 top-22 z-50 flex">
+        <div className="fixed inset-x-0 bottom-0 z-50 flex" style={{ top: "var(--flow-sidebar-top, 88px)" }}>
           <button
             type="button"
             aria-label="Close sidebar"

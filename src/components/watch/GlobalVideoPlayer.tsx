@@ -1,10 +1,10 @@
+import { useTabContext } from "../../lib/tabContext";
+import { useTabsStore } from "../../store/useTabsStore";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Maximize2, X } from "lucide-react";
 import { useLocation, useNavigate } from "react-router-dom";
 
-import { useAppSettingsStore } from "../../store/useAppSettingsStore";
 import { usePlayerStore } from "../../store/usePlayerStore";
-import { SETTINGS } from "../../lib/settings/schema";
 import { FlowPlayerCore } from "./FlowPlayerCore";
 import { useMediaSessionMetadata } from "../../lib/useMediaSessionMetadata";
 
@@ -22,8 +22,8 @@ function watchVideoIdFromPath(pathname: string) {
   return match?.[1] ? decodeURIComponent(match[1]) : null;
 }
 
-function readSlotBounds(): PlayerBounds | null {
-  const slot = document.querySelector<HTMLElement>("[data-flow-watch-player-slot='true']");
+function readSlotBounds(root: ParentNode): PlayerBounds | null {
+  const slot = root.querySelector<HTMLElement>("[data-flow-watch-player-slot='true']");
   if (!slot) return null;
   const rect = slot.getBoundingClientRect();
   if (rect.width <= 0 || rect.height <= 0) return null;
@@ -42,26 +42,28 @@ function boundsEqual(a: PlayerBounds | null, b: PlayerBounds | null) {
 }
 
 export function GlobalVideoPlayer() {
+  const tab = useTabContext();
   const navigate = useNavigate();
   const location = useLocation();
   const currentVideo = usePlayerStore((s) => s.currentVideo);
-  const isPlaying = usePlayerStore((s) => s.isPlaying);
   const videoPlayerMode = usePlayerStore((s) => s.videoPlayerMode);
   const isVideoFullscreen = usePlayerStore((s) => s.isVideoFullscreen);
   const isVideoFullscreenTransitioning = usePlayerStore((s) => s.isVideoFullscreenTransitioning);
   const watchPageCache = usePlayerStore((s) => s.watchPageCache);
-  const enterVideoPip = usePlayerStore((s) => s.enterVideoPip);
   const expandVideoPlayer = usePlayerStore((s) => s.expandVideoPlayer);
   const dismissVideoPlayer = usePlayerStore((s) => s.dismissVideoPlayer);
-  const autoPipEnabled = useAppSettingsStore((s) => s.values[SETTINGS.AUTO_PIP_ENABLED] !== "false");
+  const setIsPlaying = usePlayerStore((s) => s.setIsPlaying);
 
   const [slotBounds, setSlotBounds] = useState<PlayerBounds | null>(null);
   const frameRef = useRef<HTMLDivElement | null>(null);
   const lastSlotBoundsRef = useRef<PlayerBounds | null>(null);
-  const previousPathRef = useRef(location.pathname);
   const previousVideoIdRef = useRef(currentVideo?.id ?? null);
 
-  const isFloating = videoPlayerMode === "pip";
+  const inWatchPage = watchVideoIdFromPath(location.pathname) === currentVideo?.id;
+  const isFloating = tab.id
+    ? tab.ownsPip && videoPlayerMode === "pip"
+    : videoPlayerMode === "pip";
+  const visible = (tab.active && inWatchPage) || isFloating;
   // The pop-out window owns playback in this mode, so this window renders no
   // media element — two decoding the same video would double audio and CPU.
   const isPoppedOut = videoPlayerMode === "window";
@@ -83,7 +85,8 @@ export function GlobalVideoPlayer() {
   }, [currentVideo?.id, location.pathname, navigate]);
 
   // While the pop-out owns playback it also owns the OS transport controls.
-  useMediaSessionMetadata(!isPoppedOut);
+  const manualPipId = useTabsStore((state) => state.manualPipId);
+  useMediaSessionMetadata(!isPoppedOut && (manualPipId ? manualPipId === tab.id : tab.active));
 
   useEffect(() => {
     const frame = frameRef.current;
@@ -104,7 +107,7 @@ export function GlobalVideoPlayer() {
         ) return;
       }
 
-      const slot = document.querySelector<HTMLElement>("[data-flow-watch-player-slot='true']");
+      const slot = (tab.rootRef?.current ?? document).querySelector<HTMLElement>("[data-flow-watch-player-slot='true']");
       const scrollContainer = slot?.closest("main");
       if (!scrollContainer) return;
 
@@ -124,7 +127,7 @@ export function GlobalVideoPlayer() {
   }, [currentVideo, isFloating, isPoppedOut, isVideoFullscreen, location.pathname]);
 
   useEffect(() => {
-    if (isFloating || isPoppedOut || isVideoFullscreen || !currentVideo) return;
+    if (!tab.active || isFloating || isPoppedOut || isVideoFullscreen || !currentVideo) return;
 
     const writeFrameBounds = (bounds: PlayerBounds) => {
       const frame = frameRef.current;
@@ -136,7 +139,7 @@ export function GlobalVideoPlayer() {
     };
 
     const sync = () => {
-      const next = readSlotBounds();
+      const next = readSlotBounds(tab.rootRef?.current ?? document);
       if (!next) return;
       const prev = lastSlotBoundsRef.current;
       lastSlotBoundsRef.current = next;
@@ -147,7 +150,7 @@ export function GlobalVideoPlayer() {
     };
 
     sync();
-    const slot = document.querySelector<HTMLElement>("[data-flow-watch-player-slot='true']");
+    const slot = (tab.rootRef?.current ?? document).querySelector<HTMLElement>("[data-flow-watch-player-slot='true']");
     const observer = new ResizeObserver(sync);
     if (slot) observer.observe(slot);
     window.addEventListener("resize", sync);
@@ -178,51 +181,23 @@ export function GlobalVideoPlayer() {
       if (scrollRaf !== null) window.cancelAnimationFrame(scrollRaf);
       window.cancelAnimationFrame(settleRaf);
     };
-  }, [isFloating, isPoppedOut, isVideoFullscreen, currentVideo, location.pathname]);
-
-  useEffect(() => {
-    const previousPath = previousPathRef.current;
-    if (previousPath === location.pathname) return;
-    previousPathRef.current = location.pathname;
-
-    if (!currentVideo) return;
-
-    const prevWatchId = watchVideoIdFromPath(previousPath);
-    const nextWatchId = watchVideoIdFromPath(location.pathname);
-
-    if (nextWatchId === currentVideo.id) {
-      if (videoPlayerMode === "pip") expandVideoPlayer();
-      return;
-    }
-
-    if (prevWatchId === currentVideo.id && videoPlayerMode === "watch") {
-      if (isPlaying && autoPipEnabled) {
-        enterVideoPip("auto");
-      } else {
-        dismissVideoPlayer();
-      }
-    }
-  }, [
-    location.pathname,
-    currentVideo,
-    videoPlayerMode,
-    isPlaying,
-    autoPipEnabled,
-    enterVideoPip,
-    expandVideoPlayer,
-    dismissVideoPlayer,
-  ]);
+  }, [isFloating, isPoppedOut, isVideoFullscreen, currentVideo, location.pathname, tab.active, tab.rootRef]);
 
   const expandFromFloating = useCallback(() => {
     if (!currentVideo) return;
+    if (tab.id) useTabsStore.getState().activateTab(tab.id);
     expandVideoPlayer();
     navigate(`/watch/${currentVideo.id}`);
-  }, [currentVideo, expandVideoPlayer, navigate]);
+  }, [currentVideo, expandVideoPlayer, navigate, tab.id]);
 
   useEffect(() => {
-    window.addEventListener("flow-video-expand-request", expandFromFloating);
-    return () => window.removeEventListener("flow-video-expand-request", expandFromFloating);
-  }, [expandFromFloating]);
+    const expand = (event: Event) => {
+      const id = (event as CustomEvent<{ tabId?: string }>).detail?.tabId;
+      if (id ? id === tab.id : tab.active) expandFromFloating();
+    };
+    window.addEventListener("flow-video-expand-request", expand);
+    return () => window.removeEventListener("flow-video-expand-request", expand);
+  }, [expandFromFloating, tab.id, tab.active]);
 
   const frameStyle = useMemo(() => {
     if (isVideoFullscreen) {
@@ -264,9 +239,9 @@ export function GlobalVideoPlayer() {
   const playerNode = useMemo(
     () =>
       videoIdForPlayer ? (
-        <FlowPlayerCore videoId={videoIdForPlayer} videoDetails={cachedDetails} />
+        <FlowPlayerCore videoId={videoIdForPlayer} videoDetails={cachedDetails} compact={isFloating} />
       ) : null,
-    [videoIdForPlayer, cachedDetails],
+    [videoIdForPlayer, cachedDetails, isFloating],
   );
 
   if (!currentVideo || isPoppedOut) return null;
@@ -275,6 +250,10 @@ export function GlobalVideoPlayer() {
     <>
       <div
         ref={frameRef}
+        inert={!visible}
+        data-flow-player-tab={tab.id ?? undefined}
+        data-floating={isFloating && visible ? "true" : "false"}
+        data-player-visible={visible ? "true" : "false"}
         className={
           isVideoFullscreen
             ? "fixed z-[300] overflow-hidden bg-chrome-black"
@@ -282,7 +261,7 @@ export function GlobalVideoPlayer() {
             ? "group fixed z-50 overflow-hidden rounded-xl bg-chrome-black shadow-2xl ring-1 ring-chrome-white/10"
             : "fixed z-30 bg-chrome-black"
         }
-        style={frameStyle}
+        style={{ ...frameStyle, ...(!visible ? { visibility: "hidden", pointerEvents: "none" } as const : {}) }}
       >
         {isFloating && (
           <div className="absolute right-2 top-2 z-40 flex items-center gap-1 rounded-full bg-chrome-black/80 p-1 opacity-0 transition-opacity duration-200 ease-out group-hover:opacity-100">
@@ -297,7 +276,12 @@ export function GlobalVideoPlayer() {
             <button
               type="button"
               aria-label="Close video"
-              onClick={dismissVideoPlayer}
+              onClick={() => {
+                if (!tab.id) { dismissVideoPlayer(); return; }
+                setIsPlaying(false);
+                expandVideoPlayer();
+                useTabsStore.getState().dismissPip(tab.id);
+              }}
               className="grid h-7 w-7 place-items-center rounded-full text-chrome-white hover:bg-chrome-white/15"
             >
               <X size={16} />

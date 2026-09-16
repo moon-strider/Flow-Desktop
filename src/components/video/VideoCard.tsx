@@ -1,10 +1,11 @@
+import { useTabsStore } from "../../store/useTabsStore";
 import { useNavigate } from 'react-router-dom';
 import { useSubscriptionStore } from '../../store/useSubscriptionStore';
 import { useBlockedKeywordMatch, useFeedActionsStore } from '../../store/useFeedActionsStore';
 import { useBlockedRevealStore } from '../../lib/blockedContent';
 import { BlockedVideoCard } from './BlockedVideoCard';
 import { useLiveStore } from '../../store/useLiveStore';
-import { Plus, Ban, Check, MoreVertical, Trash2, GripHorizontal, Sparkles, Eye, EyeOff, Clock, ListPlus, Download, User } from 'lucide-react';
+import { Plus, Ban, Check, MoreVertical, Trash2, GripHorizontal, Sparkles, Eye, EyeOff, Clock, ListPlus, Download, User, SquareArrowOutUpRight } from 'lucide-react';
 import type { VideoSummary } from '../../types/video';
 import { Button } from '../ui/Button';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
@@ -22,7 +23,7 @@ import { getString } from '../../lib/i18n/index';
 import { useWatchLaterStore } from '../../store/useWatchLaterStore';
 import { useUiStore } from '../../store/useUiStore';
 import { usePlaylistModalStore } from '../../store/usePlaylistModalStore';
-import { usePlayerStore } from '../../store/usePlayerStore';
+import { usePlayerStoreApi } from '../../store/usePlayerStore';
 import { useDownloadStore } from '../../store/useDownloadStore';
 import { useDownloadsLibraryStore } from '../../store/useDownloadsLibraryStore';
 import { findDownloadedRecord, useIsDownloaded } from '../../lib/useDownloads';
@@ -98,6 +99,7 @@ function VideoCardComponent({
   dragHandleProps,
   isDragActive = false,
 }: VideoCardProps) {
+  const playerStore = usePlayerStoreApi();
   const navigate = useNavigate();
   const subscribe = useSubscriptionStore((s) => s.subscribe);
   const unsubscribe = useSubscriptionStore((s) => s.unsubscribe);
@@ -199,6 +201,20 @@ function VideoCardComponent({
     }
   }, [dominantColor, isHovered, thumbnailCandidateIndex, thumbnailCandidates.length]);
 
+  const openInNewTab = () => useTabsStore.getState().openTab(`/watch/${video.id}`, { background: true, video: { ...video, title: displayTitle } });
+  const handleVideoClick = (event: React.MouseEvent) => {
+    if (event.ctrlKey || event.metaKey) { event.preventDefault(); openInNewTab(); }
+    else onPlay(video);
+  };
+  const handleAuxClick = (event: React.MouseEvent) => {
+    if (event.button !== 1) return;
+    const target = event.target as HTMLElement;
+    if (target.closest("button, a, [data-channel-link]")) return;
+    event.preventDefault();
+    event.stopPropagation();
+    openInNewTab();
+  };
+
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
     if (isChannel) return;
     e.preventDefault();
@@ -297,7 +313,7 @@ function VideoCardComponent({
   };
 
   const handleAddToQueue = () => {
-    const player = usePlayerStore.getState();
+    const player = playerStore.getState();
     const isDuplicate = player.currentVideo?.id === video.id
       || player.queue.some((item) => item.id === video.id);
 
@@ -337,6 +353,10 @@ function VideoCardComponent({
         onClose={() => setShowMenu(false)}
         className="z-50 w-60 rounded-xl border border-chrome-neutral-800 bg-surface-container-high py-1.5"
       >
+        <button type="button" onClick={(event) => { event.stopPropagation(); openInNewTab(); setShowMenu(false); }}
+          className="w-full flex items-center gap-3 px-3.5 py-2.5 text-sm text-chrome-zinc-300 hover:bg-chrome-zinc-800 hover:text-chrome-zinc-100 transition-colors">
+          <SquareArrowOutUpRight size={16} />{getString("video_open_new_tab")}
+        </button>
         <button
           onClick={(e) => {
             e.stopPropagation();
@@ -504,11 +524,13 @@ function VideoCardComponent({
         onMouseEnter={handleMouseEnter}
         onMouseLeave={handleMouseLeave}
         onContextMenu={handleContextMenu}
+      onAuxClick={handleAuxClick}
+      onMouseDown={(event) => { if (event.button === 1 && !(event.target as HTMLElement).closest("button, a, [data-channel-link]")) event.preventDefault(); }}
       >
         <ColorWash active={isHovered} color={dominantColor} alpha={0.2} spread="row" />
         <div
           className="relative aspect-video w-40 shrink-0 cursor-pointer overflow-hidden rounded-xl bg-surface-container"
-          onClick={() => onPlay(video)}
+          onClick={handleVideoClick}
         >
           {displayThumbnail ? (
             <img
@@ -536,7 +558,7 @@ function VideoCardComponent({
 
         <div className="flex min-w-0 flex-1 flex-col">
           <h3
-            onClick={() => onPlay(video)}
+            onClick={handleVideoClick}
             style={titleClampStyle}
             className="cursor-pointer text-sm font-medium leading-snug text-chrome-neutral-100 transition-colors group-hover:text-primary"
           >
@@ -544,6 +566,7 @@ function VideoCardComponent({
           </h3>
           <button
             type="button"
+            data-channel-link
             onClick={(e) => { void handleChannelNavigate(e); }}
             className="mt-1 truncate text-left text-[13px] text-chrome-neutral-400 transition-colors hover:text-chrome-neutral-300"
           >
@@ -584,6 +607,8 @@ function VideoCardComponent({
         onMouseEnter={handleMouseEnter}
         onMouseLeave={handleMouseLeave}
         onContextMenu={handleContextMenu}
+        onAuxClick={handleAuxClick}
+        onMouseDown={(event) => { if (event.button === 1 && !(event.target as HTMLElement).closest("button, a, [data-channel-link]")) event.preventDefault(); }}
       >
         <ColorWash active={isHovered} color={dominantColor} alpha={0.2} spread="row" />
         {showDragHandle ? (
@@ -608,7 +633,7 @@ function VideoCardComponent({
 
         <div
           className="relative aspect-video w-40 shrink-0 cursor-pointer overflow-hidden rounded-xl bg-chrome-zinc-900 sm:w-48"
-          onClick={() => onPlay(video)}
+          onClick={handleVideoClick}
         >
           {displayThumbnail ? (
             <img
@@ -637,7 +662,7 @@ function VideoCardComponent({
 
         <div className="flex min-w-0 flex-1 flex-col">
           <h3
-            onClick={() => onPlay(video)}
+            onClick={handleVideoClick}
             style={titleClampStyle}
             className="cursor-pointer text-sm font-medium leading-snug text-chrome-neutral-100 transition-colors hover:text-[var(--color-primary)]"
           >
@@ -645,6 +670,7 @@ function VideoCardComponent({
           </h3>
           <button
             type="button"
+            data-channel-link
             onClick={(e) => { void handleChannelNavigate(e); }}
             className="mt-0.5 truncate text-left text-[13px] text-chrome-neutral-400 transition-colors hover:text-chrome-neutral-300"
           >
@@ -681,11 +707,13 @@ function VideoCardComponent({
       onMouseEnter={handleMouseEnter}
       onMouseLeave={handleMouseLeave}
       onContextMenu={handleContextMenu}
+        onAuxClick={handleAuxClick}
+        onMouseDown={(event) => { if (event.button === 1 && !(event.target as HTMLElement).closest("button, a, [data-channel-link]")) event.preventDefault(); }}
     >
       <ColorWash active={isHovered} color={dominantColor} alpha={0.2} />
       <div
         className="relative w-full aspect-video rounded-xl overflow-hidden bg-chrome-zinc-900 cursor-pointer"
-        onClick={() => onPlay(video)}
+        onClick={handleVideoClick}
       >
         {displayThumbnail ? (
           <img
@@ -740,6 +768,7 @@ function VideoCardComponent({
       <div className="flex gap-3 pr-1 relative z-10">
         {!hideChannelAvatar && (
           <div 
+            data-channel-link
             onClick={(e) => { void handleChannelNavigate(e); }}
             className="w-9 h-9 rounded-full bg-chrome-zinc-800 shrink-0 overflow-hidden flex items-center justify-center cursor-pointer mt-0.5 hover:opacity-80 transition-opacity"
           >
@@ -758,13 +787,14 @@ function VideoCardComponent({
 
         <div className="flex flex-col flex-1 min-w-0">
           <h3
-            onClick={() => onPlay(video)}
+            onClick={handleVideoClick}
             style={titleClampStyle}
             className="text-chrome-zinc-100 text-sm font-medium leading-snug cursor-pointer hover:text-[var(--color-primary)] transition-colors"
           >
             {displayTitle}
           </h3>
           <div
+            data-channel-link
             onClick={(e) => { void handleChannelNavigate(e); }}
             className="text-chrome-zinc-400 text-[13px] mt-0.5 truncate cursor-pointer hover:text-chrome-zinc-300 transition-colors"
           >

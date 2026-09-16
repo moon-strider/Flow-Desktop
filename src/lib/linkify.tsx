@@ -7,8 +7,8 @@ const parseTimestampToSeconds = (ts: string): number => {
   return 0;
 };
 
-export const seekToTime = (seconds: number) => {
-  window.dispatchEvent(new CustomEvent("flow-player-seek", { detail: { time: seconds } }));
+export const seekToTime = (seconds: number, tabId?: string | null) => {
+  window.dispatchEvent(new CustomEvent("flow-player-seek", { detail: { time: seconds, tabId } }));
 };
 
 export function linkifyText(text: string) {

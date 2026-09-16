@@ -495,7 +495,7 @@
   scrollbar-width: none;
 }
 
-#flow-player-root[data-fullscreen="true"] {
+[data-flow-player-root][data-fullscreen="true"] {
   width: 100% !important;
   height: 100% !important;
   max-width: none !important;
@@ -511,7 +511,7 @@
   background-color: var(--color-chrome-black) !important;
 }
 
-#flow-player-root[data-fullscreen="true"] video {
+[data-flow-player-root][data-fullscreen="true"] video {
   width: 100% !important;
   height: 100% !important;
   max-width: none !important;

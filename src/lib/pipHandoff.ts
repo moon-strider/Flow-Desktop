@@ -1,7 +1,7 @@
 import { emit, listen } from "@tauri-apps/api/event";
 
 import { useAppSettingsStore } from "../store/useAppSettingsStore";
-import { usePlayerStore } from "../store/usePlayerStore";
+import { usePlayerStore, type PlayerStoreApi } from "../store/usePlayerStore";
 import { logToBackend } from "./diagnostics";
 import { SETTINGS } from "./settings/schema";
 import { readStreamInfoEntry } from "./streamResolution";
@@ -21,6 +21,21 @@ export const PIP_RETURN_REQUEST_EVENT = "flow:pip-return-requested";
  * than leaving two windows believing they own playback.
  */
 const HANDOFF_READY_TIMEOUT_MS = 10_000;
+let popoutOwner: PlayerStoreApi | null = null;
+let pendingPopout: Promise<boolean> | null = null;
+export const ownsPopout = (store: PlayerStoreApi) => popoutOwner === store;
+
+export async function returnOtherPopout(playerStore: PlayerStoreApi) {
+  if (!popoutOwner || popoutOwner === playerStore) return;
+  const previous = popoutOwner;
+  const state = previous.getState();
+  popoutOwner = null;
+  await closePipWindow().catch(() => {});
+  if (state.currentVideo && previous.getState().videoPlayerMode === "window") {
+    state.setPipHandoff(state.currentVideo.id, state.currentTime, state.isPlaying);
+    state.expandVideoPlayer();
+  }
+}
 
 type HandoffOutcome = "ready" | "timeout" | "aborted";
 
@@ -72,8 +87,23 @@ function waitForPopoutReady(): Promise<HandoffOutcome> {
  * Returns false when the pop-out could not be opened, so callers can fall back
  * to the in-app mini player rather than dropping playback.
  */
-export async function openPopoutPlayer(): Promise<boolean> {
-  const store = usePlayerStore.getState();
+export async function openPopoutPlayer(playerStore: PlayerStoreApi = usePlayerStore): Promise<boolean> {
+  const previous = pendingPopout;
+  const request = (async () => {
+    await previous?.catch(() => false);
+    await returnOtherPopout(playerStore);
+    return openOwnedPopout(playerStore);
+  })();
+  pendingPopout = request;
+  try {
+    return await request;
+  } finally {
+    if (pendingPopout === request) pendingPopout = null;
+  }
+}
+
+async function openOwnedPopout(playerStore: PlayerStoreApi): Promise<boolean> {
+  const store = playerStore.getState();
   const video = store.currentVideo;
   if (!video) return false;
 
@@ -86,6 +116,7 @@ export async function openPopoutPlayer(): Promise<boolean> {
   // A paused handoff has nothing to keep playing through, so it swaps at once.
   const silentUntilTakeover = store.isPlaying;
 
+  popoutOwner = playerStore;
   try {
     await openPipWindow({
       queue,
@@ -98,6 +129,7 @@ export async function openPopoutPlayer(): Promise<boolean> {
       silentUntilTakeover,
     });
   } catch (error) {
+    if (popoutOwner === playerStore) popoutOwner = null;
     void logToBackend("warn", "pop-out player window failed to open", {
       videoId: video.id,
       cause: String(error),
@@ -105,8 +137,13 @@ export async function openPopoutPlayer(): Promise<boolean> {
     return false;
   }
 
+  if (popoutOwner !== playerStore || playerStore.getState().currentVideo?.id !== video.id) {
+    await dismissPopoutPlayer(playerStore);
+    return true;
+  }
+
   if (!silentUntilTakeover) {
-    usePlayerStore.getState().enterVideoWindowPip();
+    playerStore.getState().enterVideoWindowPip();
     return true;
   }
 
@@ -117,9 +154,12 @@ export async function openPopoutPlayer(): Promise<boolean> {
     return true;
   }
 
-  const current = usePlayerStore.getState();
+  const current = playerStore.getState();
   // The video can have changed or stopped while the pop-out was warming up.
-  if (!current.currentVideo || current.currentVideo.id !== video.id) return true;
+  if (popoutOwner !== playerStore || !current.currentVideo || current.currentVideo.id !== video.id) {
+    await dismissPopoutPlayer(playerStore);
+    return true;
+  }
 
   await emit(PIP_EVENTS.takeover, {
     positionSeconds: current.currentTime,
@@ -127,7 +167,7 @@ export async function openPopoutPlayer(): Promise<boolean> {
     muted: current.muted,
   } satisfies PipTakeoverPayload).catch(() => {});
 
-  usePlayerStore.getState().enterVideoWindowPip();
+  playerStore.getState().enterVideoWindowPip();
   if (outcome === "timeout") {
     void logToBackend("warn", "pop-out handoff swapped without a ready signal", {
       videoId: video.id,
@@ -146,6 +186,8 @@ export async function requestPopoutReturn(): Promise<void> {
 }
 
 /** Closes the pop-out outright — used when this window takes over playback. */
-export async function dismissPopoutPlayer(): Promise<void> {
+export async function dismissPopoutPlayer(playerStore: PlayerStoreApi = usePlayerStore): Promise<void> {
+  if (popoutOwner !== playerStore) return;
+  popoutOwner = null;
   await closePipWindow().catch(() => {});
 }

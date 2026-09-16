@@ -18,7 +18,7 @@ const chromeButton =
  * driven by the handoff `usePipSession` hydrates.
  */
 export function PipWindowApp() {
-  const { status, alwaysOnTop, toggleAlwaysOnTop, returnToMainWindow, closeWindow } =
+  const { status, sessionRevision, alwaysOnTop, toggleAlwaysOnTop, returnToMainWindow, closeWindow } =
     usePipSession();
   usePipWindowAspectLock();
 
@@ -34,7 +34,7 @@ export function PipWindowApp() {
         // Widest 16:9 box that still fits the window, so the transport controls
         // stay inside the frame even mid-resize.
         <div className="w-full max-w-[calc(100vh*16/9)]">
-          <FlowPlayerCore videoId={currentVideo.id} videoDetails={null} />
+          <FlowPlayerCore key={sessionRevision} videoId={currentVideo.id} videoDetails={null} />
         </div>
       ) : (
         <div

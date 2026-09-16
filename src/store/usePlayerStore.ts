@@ -1,4 +1,5 @@
-import { create } from "zustand";
+import { create, useStore } from "zustand";
+import { createContext, useContext } from "react";
 import type { CaptionTrack, RelatedContentItem, VideoDetails, VideoSummary } from "../types/video";
 import { prefetchStreamInfo } from "../lib/streamResolution";
 
@@ -161,7 +162,7 @@ interface PlayerState {
   setIsQueuePanelOpen: (open: boolean) => void;
 }
 
-export const usePlayerStore = create<PlayerState>((set, get) => ({
+export const createPlayerStore = () => create<PlayerState>((set, get) => ({
   currentVideo: null,
   isPlaying: false,
   volume: 1,
@@ -582,3 +583,17 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
     set({ subtitleStyle: style });
   },
 }));
+
+export type PlayerStoreApi = ReturnType<typeof createPlayerStore>;
+
+const defaultPlayerStore = createPlayerStore();
+export const PlayerStoreContext = createContext<PlayerStoreApi>(defaultPlayerStore);
+export const usePlayerStoreApi = () => useContext(PlayerStoreContext);
+
+function useScopedPlayerStore(): PlayerState;
+function useScopedPlayerStore<T>(selector: (state: PlayerState) => T): T;
+function useScopedPlayerStore(selector: (state: PlayerState) => unknown = (state) => state) {
+  return useStore(usePlayerStoreApi(), selector);
+}
+
+export const usePlayerStore = Object.assign(useScopedPlayerStore, defaultPlayerStore);

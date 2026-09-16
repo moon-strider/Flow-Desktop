@@ -1,3 +1,4 @@
+import { useTabContext } from "../../lib/tabContext";
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
@@ -24,6 +25,8 @@ export function AnchoredPortalMenu({
   children,
   closeOnScroll = true,
 }: AnchoredPortalMenuProps) {
+  const { active } = useTabContext();
+  useEffect(() => { if (!active) onClose(); }, [active, onClose]);
   const ref = useRef<HTMLDivElement>(null);
   const [style, setStyle] = useState<React.CSSProperties>({
     position: "fixed",
@@ -70,6 +73,8 @@ export function AnchoredPortalMenu({
       document.removeEventListener("keydown", onKey);
     };
   }, [onClose, closeOnScroll]);
+
+  if (!active) return null;
 
   return createPortal(
     <div

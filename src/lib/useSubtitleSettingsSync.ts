@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { SETTINGS } from "./settings/schema";
 import { useAppSettingsStore } from "../store/useAppSettingsStore";
-import { usePlayerStore } from "../store/usePlayerStore";
+import { usePlayerStoreApi } from "../store/usePlayerStore";
 
 /**
  * Applies the Settings-page subtitle font size / bold values onto the
@@ -15,9 +15,10 @@ import { usePlayerStore } from "../store/usePlayerStore";
  * for the same reason: one applied change must not be re-applied by the next
  * surface to mount.
  */
-let lastAppliedSettingsKey: string | null = null;
+const appliedSettings = new WeakMap<ReturnType<typeof usePlayerStoreApi>, string>();
 
 export function useSubtitleSettingsSync() {
+  const playerStore = usePlayerStoreApi();
   const settingsLoaded = useAppSettingsStore((state) => state.loaded);
   const fontSizeSetting = useAppSettingsStore(
     (state) => state.values[SETTINGS.SUBTITLE_FONT_SIZE] ?? "14",
@@ -32,14 +33,15 @@ export function useSubtitleSettingsSync() {
     const parsed = Number(fontSizeSetting);
     const fontSize = Number.isFinite(parsed) ? parsed : 14;
     const key = `${fontSize}|${bold}`;
+    const lastAppliedSettingsKey = appliedSettings.get(playerStore) ?? null;
     if (lastAppliedSettingsKey === key) return;
 
     const isFirstObservation = lastAppliedSettingsKey === null;
-    lastAppliedSettingsKey = key;
+    appliedSettings.set(playerStore, key);
     // First observation is baseline capture, not a user change of the setting.
     if (isFirstObservation) return;
 
-    const { subtitleStyle, setSubtitleStyle } = usePlayerStore.getState();
+    const { subtitleStyle, setSubtitleStyle } = playerStore.getState();
     if (subtitleStyle.fontSize === fontSize && subtitleStyle.isBold === bold) return;
     setSubtitleStyle({ ...subtitleStyle, fontSize, isBold: bold });
   }, [bold, fontSizeSetting, settingsLoaded]);

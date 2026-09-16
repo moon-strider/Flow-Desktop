@@ -1,3 +1,4 @@
+import { useTabContext } from "./tabContext";
 import { useCallback, useEffect, useRef } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
@@ -12,7 +13,7 @@ import { prefetchStreamInfo } from "./streamResolution";
 import { getString } from "./i18n/index";
 import { useDownloadStore } from "../store/useDownloadStore";
 import { useMusicPlayerStore } from "../store/useMusicPlayerStore";
-import { usePlayerStore } from "../store/usePlayerStore";
+import { usePlayerStoreApi } from "../store/usePlayerStore";
 import { useUiStore } from "../store/useUiStore";
 import type { SongItem } from "../types/music";
 
@@ -69,13 +70,14 @@ async function resolveSong(videoId: string): Promise<SongItem | null> {
 
 // The video element only accepts a seek once it knows its duration. Poll briefly
 // after navigation, then hand off to the player's existing seek event bus.
-function applyStartOffset(seconds: number) {
+function applyStartOffset(seconds: number, tabId: string | null) {
   let attempts = 0;
   const tick = () => {
     attempts += 1;
-    const video = document.querySelector<HTMLVideoElement>("video");
+    const root = tabId ? document.querySelector(`[data-flow-player-tab="${tabId}"]`) : document;
+    const video = root?.querySelector<HTMLVideoElement>("video");
     if (video && Number.isFinite(video.duration) && video.duration > 0) {
-      seekToTime(seconds);
+      seekToTime(seconds, tabId);
       return;
     }
     if (attempts < 20) window.setTimeout(tick, 300);
@@ -89,6 +91,8 @@ function applyStartOffset(seconds: number) {
  * `download` → the global download dialog. Mounted once at the App root.
  */
 export function useDeepLinkHandoff() {
+  const playerStore = usePlayerStoreApi();
+  const tab = useTabContext();
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -157,7 +161,7 @@ export function useDeepLinkHandoff() {
       // relying on the Watch page to resolve the id on its own.
       try {
         const details = await getVideoDetails(handoff.v);
-        usePlayerStore.getState().setQueue(
+        playerStore.getState().setQueue(
           [
             {
               id: details.id,
@@ -189,9 +193,9 @@ export function useDeepLinkHandoff() {
 
       prefetchStreamInfo(handoff.v);
       navigate(`/watch/${handoff.v}`);
-      if (handoff.t && handoff.t > 0) applyStartOffset(handoff.t);
+      if (handoff.t && handoff.t > 0) applyStartOffset(handoff.t, tab.id);
     },
-    [navigate],
+    [navigate, playerStore, tab.id],
   );
 
   // Hold a handoff that arrives mid-onboarding until setup finishes, so the

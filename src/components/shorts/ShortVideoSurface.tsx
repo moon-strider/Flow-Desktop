@@ -1,3 +1,4 @@
+import { useTabContext } from "../../lib/tabContext";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import * as dashjs from "dashjs";
 import {
@@ -148,6 +149,7 @@ export function ShortVideoSurface({
   const [statsVisible, setStatsVisible] = useState(false);
   const [isBoosting, setIsBoosting] = useState(false);
 
+  const tab = useTabContext();
   const playbackRate = usePlayerStore((state) => state.playbackRate);
   const setPlaybackRate = usePlayerStore((state) => state.setPlaybackRate);
   const rememberPlaybackSpeed = useAppSettingsStore((state) => state.values[SETTINGS.REMEMBER_PLAYBACK_SPEED] === "true");
@@ -614,14 +616,14 @@ export function ShortVideoSurface({
   );
 
   useEffect(() => {
-    if (!active) return;
+    if (!active || !tab.active) return;
     const handleExternalSeek = (event: Event) => {
       const detail = (event as CustomEvent<{ time?: number }>).detail;
       if (typeof detail?.time === "number") seekTo(detail.time);
     };
     window.addEventListener("flow-player-seek", handleExternalSeek);
     return () => window.removeEventListener("flow-player-seek", handleExternalSeek);
-  }, [active, seekTo]);
+  }, [active, seekTo, tab.active]);
 
   return (
     <div className="relative h-full w-full">

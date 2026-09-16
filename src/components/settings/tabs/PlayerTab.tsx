@@ -49,11 +49,9 @@ export function PlayerTab() {
   const [fullscreenTitle, setFullscreenTitle] = useBoolPref(SETTINGS.SHOW_FULLSCREEN_TITLE, false);
   const [adaptiveSize, setAdaptiveSize] = useBoolPref(SETTINGS.ADAPTIVE_PLAYER_SIZE_ENABLED, true);
 
-  const [autoPip, setAutoPip] = useBoolPref(SETTINGS.AUTO_PIP_ENABLED, false);
   const [pipButton, setPipButton] = useBoolPref(SETTINGS.MANUAL_PIP_BUTTON_ENABLED, true);
   const [pipSeparateWindow, setPipSeparateWindow] = useBoolPref(SETTINGS.PIP_SEPARATE_WINDOW, true);
   const [pipAlwaysOnTop, setPipAlwaysOnTop] = useBoolPref(SETTINGS.PIP_ALWAYS_ON_TOP, true);
-  const [pipOnMinimize, setPipOnMinimize] = useBoolPref(SETTINGS.PIP_ON_MINIMIZE, true);
 
   return (
     <div className="space-y-6 pb-8">
@@ -173,9 +171,6 @@ export function PlayerTab() {
       </SettingsGroup>
 
       <SettingsGroup title={getString('settings_group_pip')}>
-        <SettingItem title={getString('settings_auto_pip')} description={getString('settings_auto_pip_desc')}>
-          <ToggleSwitch checked={autoPip} onChange={setAutoPip} />
-        </SettingItem>
         <SettingItem title={getString('settings_pip_toggle')} description={getString('settings_pip_toggle_desc')}>
           <ToggleSwitch checked={pipButton} onChange={setPipButton} />
         </SettingItem>
@@ -184,9 +179,6 @@ export function PlayerTab() {
         </SettingItem>
         <SettingItem title={getString('settings_pip_always_on_top')} description={getString('settings_pip_always_on_top_desc')} disabled={!pipSeparateWindow}>
           <ToggleSwitch checked={pipAlwaysOnTop} onChange={setPipAlwaysOnTop} disabled={!pipSeparateWindow} />
-        </SettingItem>
-        <SettingItem title={getString('settings_pip_on_minimize')} description={getString('settings_pip_on_minimize_desc')} disabled={!pipSeparateWindow}>
-          <ToggleSwitch checked={pipOnMinimize} onChange={setPipOnMinimize} disabled={!pipSeparateWindow} />
         </SettingItem>
       </SettingsGroup>
 

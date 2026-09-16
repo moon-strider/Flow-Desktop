@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, lazy, Suspense } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { usePlayerStore } from "../store/usePlayerStore";
+import { usePlayerStore, usePlayerStoreApi } from "../store/usePlayerStore";
 import { useFeedHiddenFilter } from "../store/useFeedActionsStore";
 import { useSubscriptionStore } from "../store/useSubscriptionStore";
 import { useSettingsStore } from "../store/useSettingsStore";
@@ -49,6 +49,7 @@ function mapRelatedItemToVideoSummary(item: RelatedContentItem): VideoSummary {
 }
 
 export function Watch() {
+  const playerStore = usePlayerStoreApi();
   const { videoId } = useParams<{ videoId: string }>();
   const navigate = useNavigate();
 
@@ -92,7 +93,7 @@ export function Watch() {
     if (!videoId) return;
     if (currentVideo && currentVideo.id === videoId) return;
 
-    const queuedIndex = usePlayerStore.getState().queue.findIndex((item) => item.id === videoId);
+    const queuedIndex = playerStore.getState().queue.findIndex((item) => item.id === videoId);
     if (queuedIndex >= 0) {
       playQueueItem(queuedIndex);
       return;
@@ -129,7 +130,7 @@ export function Watch() {
 
   useEffect(() => {
     if (!videoId) return;
-    const currentCache = usePlayerStore.getState().watchPageCache;
+    const currentCache = playerStore.getState().watchPageCache;
     const cachedWatchPage = currentCache?.videoId === videoId ? currentCache : null;
 
     setChannelDetails(cachedWatchPage?.channelDetails ?? null);
@@ -161,10 +162,10 @@ export function Watch() {
         // A cold open is still holding a stub with nothing but an id. Drop it so
         // the page shows its error state rather than a player bound to a video
         // nothing is known about.
-        const stub = usePlayerStore.getState().currentVideo;
+        const stub = playerStore.getState().currentVideo;
         if (stub?.id === videoId && !stub.title) {
           setPageError(getString("watch_error_body"));
-          usePlayerStore.getState().clearQueue();
+          playerStore.getState().clearQueue();
         }
       }
     };
@@ -206,7 +207,7 @@ export function Watch() {
 
   useEffect(() => {
     if (!videoId || !playbackSettled) return;
-    const currentCache = usePlayerStore.getState().watchPageCache;
+    const currentCache = playerStore.getState().watchPageCache;
     const cachedWatchPage = currentCache?.videoId === videoId ? currentCache : null;
 
     if (offlineRecord) {

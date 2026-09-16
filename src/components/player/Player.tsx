@@ -1,3 +1,5 @@
+import { useTabContext } from "../../lib/tabContext";
+import { useTabsStore } from "../../store/useTabsStore";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as dashjs from "dashjs";
 import Hls from "hls.js";
@@ -5,7 +7,7 @@ import { AlertTriangle, Loader2, RotateCcw } from "lucide-react";
 import { PlayerErrorState } from "../ui/PlayerErrorState";
 import type { PlayerErrorInfo } from "../../lib/playerError";
 import { getString } from "../../lib/i18n/index";
-import { usePlayerStore } from "../../store/usePlayerStore";
+import { usePlayerStore, usePlayerStoreApi } from "../../store/usePlayerStore";
 import { useSettingsStore, type SponsorBlockCategory, type SponsorBlockAction } from "../../store/useSettingsStore";
 import type { AudioTrack, CaptionTrack, StreamVariant, VideoChapter } from "../../types/video";
 import { FlowPlayerControls } from "./FlowPlayerControls";
@@ -27,7 +29,7 @@ import {
   decideExternalAudioSync,
 } from "../../lib/externalAudioSync";
 import { useSubtitleSettingsSync } from "../../lib/useSubtitleSettingsSync";
-import { openPopoutPlayer } from "../../lib/pipHandoff";
+import { openPopoutPlayer, returnOtherPopout } from "../../lib/pipHandoff";
 import {
   formatPlaybackRate,
   normalizePlaybackRate,
@@ -52,6 +54,7 @@ import {
 } from "../../lib/playerChrome";
 
 type PlayerProps = {
+  compact?: boolean;
   src?: string | null;
   dashManifestUrl?: string | null;
   hlsManifestUrl?: string | null;
@@ -304,6 +307,7 @@ function cx(...classes: Array<string | false | null | undefined>) {
 }
 
 export const Player: React.FC<PlayerProps> = ({
+  compact,
   src,
   dashManifestUrl,
   hlsManifestUrl,
@@ -330,6 +334,8 @@ export const Player: React.FC<PlayerProps> = ({
   chapters = [],
 }) => {
   const [activeQualityLabel, setActiveQualityLabel] = useState<string | null>(null);
+  const playerStore = usePlayerStoreApi();
+  const tab = useTabContext();
   const videoRef = useRef<HTMLVideoElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -572,7 +578,7 @@ export const Player: React.FC<PlayerProps> = ({
     !isHlsPlayback &&
     (hasSelectedAlternateAudio || (!!selectedQuality && !selectedQuality.hasAudio));
 
-  const isPipMode = videoPlayerMode === "pip";
+  const isPipMode = compact ?? videoPlayerMode === "pip";
   const isTheaterSurface = isTheaterMode && !isPipMode;
   const shouldShowControls = controlsVisible || !isPlaying || settingsOpen || isScrubbing;
   const showAmbient = ambientMode && isTheaterSurface && !error;
@@ -1215,7 +1221,8 @@ export const Player: React.FC<PlayerProps> = ({
 
   useEffect(() => {
     const handleExternalSeek = (e: Event) => {
-      const customEvent = e as CustomEvent<{ time: number }>;
+      const customEvent = e as CustomEvent<{ time: number; tabId?: string }>;
+      if (customEvent.detail?.tabId ? customEvent.detail.tabId !== tab.id : !tab.active) return;
       if (customEvent.detail && typeof customEvent.detail.time === "number") {
         seekTo(customEvent.detail.time);
       }
@@ -1224,7 +1231,7 @@ export const Player: React.FC<PlayerProps> = ({
     return () => {
       window.removeEventListener("flow-player-seek", handleExternalSeek);
     };
-  }, [seekTo]);
+  }, [seekTo, tab.active, tab.id]);
 
   const setPlaybackDesired = useCallback((shouldPlay: boolean) => {
     const video = videoRef.current;
@@ -1263,7 +1270,7 @@ export const Player: React.FC<PlayerProps> = ({
   }, [captions, preferredSubtitleLanguage]);
 
   const nudgeSubtitleFontSize = useCallback((delta: number) => {
-    const { subtitleStyle: current, setSubtitleStyle } = usePlayerStore.getState();
+    const { subtitleStyle: current, setSubtitleStyle } = playerStore.getState();
     const fontSize = Math.min(32, Math.max(12, current.fontSize + delta));
     if (fontSize === current.fontSize) return;
     setSubtitleStyle({ ...current, fontSize });
@@ -1308,14 +1315,14 @@ export const Player: React.FC<PlayerProps> = ({
 
   useEffect(() => {
     const controller = windowFullscreenControllerRef.current;
-    if (!controller) return;
+    if (!controller || !tab.active) return;
 
     let disposed = false;
     let unlisten: (() => void) | null = null;
     watchNativeFullscreenExit(
       controller,
-      () => usePlayerStore.getState().isVideoFullscreen,
-      () => usePlayerStore.getState().setIsVideoFullscreen(false),
+      () => playerStore.getState().isVideoFullscreen,
+      () => playerStore.getState().setIsVideoFullscreen(false),
     )
       .then((dispose) => {
         if (disposed) dispose();
@@ -1330,7 +1337,7 @@ export const Player: React.FC<PlayerProps> = ({
       disposed = true;
       unlisten?.();
     };
-  }, []);
+  }, [playerStore, tab.active]);
 
   const toggleFullscreen = useCallback(() => {
     const active = !isFullscreen;
@@ -1346,32 +1353,35 @@ export const Player: React.FC<PlayerProps> = ({
   }, [isFullscreen, setIsFullscreen, setIsVideoFullscreenTransitioning, syncNativeFullscreen]);
 
   const togglePictureInPicture = useCallback(() => {
-    if (videoPlayerMode === "pip") {
+    if (isPipMode) {
       expandVideoPlayer();
-      window.dispatchEvent(new CustomEvent("flow-video-expand-request"));
+      window.dispatchEvent(new CustomEvent("flow-video-expand-request", { detail: { tabId: tab.id } }));
       return;
     }
     if (isFullscreen) {
       setIsFullscreen(false);
       void syncNativeFullscreen(false);
     }
+    if (tab.id) useTabsStore.getState().claimPip(tab.id);
     if (popoutPipEnabled) {
       // Falls back to the in-app mini player if the OS window cannot be opened,
       // rather than leaving the click with nothing to show for it.
-      void openPopoutPlayer().then((opened) => {
+      void openPopoutPlayer(playerStore).then((opened) => {
         if (!opened) enterVideoPip("manual");
       });
       return;
     }
-    enterVideoPip("manual");
+    void returnOtherPopout(playerStore).then(() => enterVideoPip("manual"));
   }, [
+    playerStore,
+    tab.id,
     enterVideoPip,
     expandVideoPlayer,
     isFullscreen,
     popoutPipEnabled,
     setIsFullscreen,
     syncNativeFullscreen,
-    videoPlayerMode,
+    isPipMode,
   ]);
 
   const updateBuffered = useCallback(() => {
@@ -2003,9 +2013,8 @@ export const Player: React.FC<PlayerProps> = ({
     const audio = audioRef.current;
     if (!video) return;
 
-    if (isSourceSwitching || sourceSwitchingRef.current) return;
-
     desiredPlayingRef.current = isPlaying;
+    if (isSourceSwitching || sourceSwitchingRef.current) return;
     if (isPlaying && (isDashPlayback || isHlsPlayback || src) && !error) {
       void video.play().catch((cause) => {
         if ((cause as DOMException | null)?.name === "AbortError") return;
@@ -2116,6 +2125,10 @@ export const Player: React.FC<PlayerProps> = ({
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
+      const focusedPlayer = target?.closest("[data-flow-player-root]");
+      if (focusedPlayer && focusedPlayer !== containerRef.current) return;
+      if (!tab.active && focusedPlayer !== containerRef.current) return;
+      if (target?.closest("button, [role=tab]")) return;
       if (target?.tagName === "INPUT" || target?.tagName === "TEXTAREA" || target?.isContentEditable) return;
       if (event.ctrlKey || event.metaKey || event.altKey) return;
 
@@ -2233,6 +2246,7 @@ export const Player: React.FC<PlayerProps> = ({
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [
+    tab.active,
     currentTime,
     isFullscreen,
     isTheaterMode,
@@ -2452,7 +2466,7 @@ export const Player: React.FC<PlayerProps> = ({
   return (
     <div
       ref={containerRef}
-      id="flow-player-root"
+      data-flow-player-root
       data-fullscreen={isFullscreen || undefined}
       className={cx(
         "group/player",
@@ -2492,8 +2506,8 @@ export const Player: React.FC<PlayerProps> = ({
         onProgress={updateBuffered}
         onTimeUpdate={handleTimeUpdate}
         onPlaying={() => {
-          const activeVideoId = usePlayerStore.getState().currentVideo?.id;
-          if (activeVideoId) usePlayerStore.getState().markPlaybackStarted(activeVideoId);
+          const activeVideoId = playerStore.getState().currentVideo?.id;
+          if (activeVideoId) playerStore.getState().markPlaybackStarted(activeVideoId);
         }}
         onPlay={() => {
           desiredPlayingRef.current = true;

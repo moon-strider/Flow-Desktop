@@ -24,6 +24,7 @@ export interface WatchLayoutSlots {
 export type WatchLayoutProps = WatchLayoutSlots;
 
 export interface FlowPlayerCoreProps {
+  compact?: boolean;
   videoId: string;
   videoDetails: VideoDetails | null;
   onEnded?: () => void;

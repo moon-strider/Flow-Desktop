@@ -42,6 +42,7 @@ const SILENCE_FALLBACK_MS = 4000;
  * shared implicitly — every crossing is an explicit event or command.
  */
 export function usePipSession() {
+  const [sessionRevision, setSessionRevision] = useState(0);
   const [status, setStatus] = useState<PipSessionStatus>("loading");
   const [alwaysOnTop, setAlwaysOnTop] = useState(true);
   const silenceFallbackRef = useRef<number | null>(null);
@@ -88,10 +89,12 @@ export function usePipSession() {
     // takeover event lifts it at the swap.
     store.setHandoffSilent(session.silentUntilTakeover);
     store.setQueue(session.queue, index);
+    store.setIsPlaying(session.playing);
     store.setPipHandoff(video.id, session.positionSeconds, session.playing);
     // The pop-out *is* the mini player surface, so its whole viewport uses the
     // compact transport rather than the full watch-page controls.
     store.enterVideoPip("manual");
+    setSessionRevision((revision) => revision + 1);
     setStatus("playing");
   }, []);
 
@@ -274,5 +277,5 @@ export function usePipSession() {
     });
   }, []);
 
-  return { status, alwaysOnTop, toggleAlwaysOnTop, returnToMainWindow, closeWindow };
+  return { status, sessionRevision, alwaysOnTop, toggleAlwaysOnTop, returnToMainWindow, closeWindow };
 }

@@ -1,3 +1,5 @@
+import { useTabContext } from '../../lib/tabContext';
+import { useTabsStore } from '../../store/useTabsStore';
 import React, { useState, useEffect, useRef } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { ArrowLeft, ArrowRight, HatGlasses, Loader2, Menu, Search, Settings } from 'lucide-react';
@@ -14,6 +16,9 @@ import { toggleDeepFlow } from '../../lib/deepFlow';
 import { NotificationsBell } from '../notifications/NotificationsBell';
 
 export function Topbar() {
+  const tab = useTabContext();
+  const suggestionsId = React.useId();
+  const history = useTabsStore((s) => s.tabs.find((item) => item.id === tab.id));
   const toggleSidebar = useUiStore((s) => s.toggleSidebar);
   const toggleWatchSidebar = useUiStore((s) => s.toggleWatchSidebar);
   const setSearchQuery = useUiStore((s) => s.setSearchQuery);
@@ -41,6 +46,7 @@ export function Topbar() {
 
   useEffect(() => {
     const handleShortcut = (event: KeyboardEvent) => {
+      if (!tab.active) return;
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
         event.preventDefault();
         searchInputRef.current?.focus();
@@ -51,7 +57,7 @@ export function Topbar() {
 
     window.addEventListener('keydown', handleShortcut);
     return () => window.removeEventListener('keydown', handleShortcut);
-  }, []);
+  }, [tab.active]);
 
   useEffect(() => {
     const query = localSearch.trim();
@@ -193,6 +199,7 @@ export function Topbar() {
         <div className="hidden ml-1 items-center sm:flex">
           <IconButton
             title="Back"
+            disabled={history ? history.index === 0 : false}
             onClick={() => navigate(-1)}
             className="text-chrome-zinc-300 hover:text-chrome-zinc-100"
           >
@@ -200,6 +207,7 @@ export function Topbar() {
           </IconButton>
           <IconButton
             title="Forward"
+            disabled={history ? history.index === history.entries.length - 1 : false}
             onClick={() => navigate(1)}
             className="text-chrome-zinc-300 hover:text-chrome-zinc-100"
           >
@@ -222,8 +230,8 @@ export function Topbar() {
               value={localSearch}
               role="combobox"
               aria-expanded={showSuggestions && suggestions.length > 0}
-              aria-controls="search-suggestions"
-              aria-activedescendant={activeSuggestion >= 0 ? `search-suggestion-${activeSuggestion}` : undefined}
+              aria-controls={suggestionsId}
+              aria-activedescendant={activeSuggestion >= 0 ? `${suggestionsId}-${activeSuggestion}` : undefined}
               autoComplete="off"
               onFocus={() => setShowSuggestions(true)}
               onKeyDown={handleSearchKeyDown}
@@ -250,14 +258,14 @@ export function Topbar() {
         {/* Suggestion Dropdown overlay */}
         {showSuggestions && suggestions.length > 0 && (
           <div
-            id="search-suggestions"
+            id={suggestionsId}
             role="listbox"
             className="absolute left-4 right-4 top-[48px] z-50 max-h-[60vh] overflow-y-auto overscroll-contain rounded-2xl border border-chrome-zinc-800 bg-chrome-dropdown py-1 scrollbar-none md:left-8 md:right-8"
           >
             {suggestions.map((item, index) => (
               <div
                 key={item}
-                id={`search-suggestion-${index}`}
+                id={`${suggestionsId}-${index}`}
                 role="option"
                 aria-selected={index === activeSuggestion}
                 // Keep focus in the input so the caret and keyboard stay live.

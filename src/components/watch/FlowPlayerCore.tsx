@@ -1,5 +1,6 @@
+import { useTabContext } from "../../lib/tabContext";
 import { useCallback, useEffect, useMemo, useRef } from "react";
-import { usePlayerStore } from "../../store/usePlayerStore";
+import { usePlayerStore, usePlayerStoreApi } from "../../store/usePlayerStore";
 import { useUiStore } from "../../store/useUiStore";
 import Player from "../player/Player";
 import {
@@ -32,7 +33,9 @@ const NEXT_VIDEO_PREFETCH_LEAD_SECONDS = 20;
  * time updates never re-render sibling slots (metadata / related). The <Player> itself
  * owns its sizing and reads `isTheaterMode` directly.
  */
-export function FlowPlayerCore({ videoId, videoDetails, onEnded }: FlowPlayerCoreProps) {
+export function FlowPlayerCore({ videoId, videoDetails, onEnded, compact }: FlowPlayerCoreProps) {
+  const playerStore = usePlayerStoreApi();
+  const tab = useTabContext();
   const currentVideo = usePlayerStore((s) => s.currentVideo);
   const dearrowData = usePlayerStore((s) => s.dearrowData);
   const setCurrentTime = usePlayerStore((s) => s.setCurrentTime);
@@ -58,7 +61,7 @@ export function FlowPlayerCore({ videoId, videoDetails, onEnded }: FlowPlayerCor
       if (prefetchedNextForRef.current === currentVideo.id) return;
       if (!(mediaDuration > 0) || mediaDuration - time > NEXT_VIDEO_PREFETCH_LEAD_SECONDS) return;
 
-      const { queue, currentIndex, autoplayCandidates } = usePlayerStore.getState();
+      const { queue, currentIndex, autoplayCandidates } = playerStore.getState();
       const upcoming = queue[currentIndex + 1] ?? autoplayCandidates[0] ?? null;
       prefetchedNextForRef.current = currentVideo.id;
       if (upcoming) prefetchStreamInfo(upcoming.id);
@@ -191,7 +194,7 @@ export function FlowPlayerCore({ videoId, videoDetails, onEnded }: FlowPlayerCor
 
     clearLocalWatchProgress(currentVideo.id);
     if (repeatMode === "one") {
-      seekToTime(0);
+      seekToTime(0, tab.id);
       setIsPlaying(true);
       onEnded?.();
       return;
@@ -247,6 +250,7 @@ export function FlowPlayerCore({ videoId, videoDetails, onEnded }: FlowPlayerCor
 
   return (
     <Player
+      compact={compact}
       src={stream.streamUrl}
       title={title}
       poster={poster}

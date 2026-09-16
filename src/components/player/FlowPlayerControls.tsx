@@ -23,7 +23,7 @@ import {
   VolumeX,
   Sliders,
 } from "lucide-react";
-import { usePlayerStore, type PlaybackRate } from "../../store/usePlayerStore";
+import { usePlayerStore, usePlayerStoreApi, type PlaybackRate } from "../../store/usePlayerStore";
 import { useSettingsStore, type SponsorBlockCategory } from "../../store/useSettingsStore";
 import type { AudioTrack, CaptionTrack, StreamVariant, VideoChapter } from "../../types/video";
 import { SubtitleCustomizer } from "./SubtitleCustomizer";
@@ -166,6 +166,7 @@ export const FlowPlayerControls: React.FC<FlowPlayerControlsProps> = ({
   chapters = [],
   activeQualityLabel,
 }) => {
+  const playerStore = usePlayerStoreApi();
   const {
     isPlaying,
     currentVideo,
@@ -213,7 +214,7 @@ export const FlowPlayerControls: React.FC<FlowPlayerControlsProps> = ({
 
       const scale = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? window.innerHeight : 1;
       const delta = Math.sign(event.deltaY) * Math.min(0.05, Math.abs(event.deltaY * scale) * 0.0005);
-      const state = usePlayerStore.getState();
+      const state = playerStore.getState();
       const currentVolume = state.muted ? 0 : state.volume;
       const nextVolume = Math.min(1, Math.max(0, currentVolume - delta));
       if (nextVolume === currentVolume) return;
@@ -339,7 +340,7 @@ export const FlowPlayerControls: React.FC<FlowPlayerControlsProps> = ({
 
   const progressPct =
     duration > 0
-      ? Math.min(100, Math.max(0, (usePlayerStore.getState().currentTime / duration) * 100))
+      ? Math.min(100, Math.max(0, (playerStore.getState().currentTime / duration) * 100))
       : 0;
 
   const supportedQualities = qualities;
@@ -730,7 +731,7 @@ export const FlowPlayerControls: React.FC<FlowPlayerControlsProps> = ({
                   title="Submit SponsorBlock segment"
                   aria-label="Submit SponsorBlock segment"
                   onClick={() => {
-                    setSubmitAtSeconds(usePlayerStore.getState().currentTime);
+                    setSubmitAtSeconds(playerStore.getState().currentTime);
                     setSubmitDialogOpen(true);
                   }}
                   className="hidden h-7 w-7 place-items-center rounded-full hover:bg-chrome-white/10 sm:grid"

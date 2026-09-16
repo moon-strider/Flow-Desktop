@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 
 import { SETTINGS } from "./settings/schema";
 import { getSettingValue, setSettingValue, useAppSettingsStore } from "../store/useAppSettingsStore";
-import { usePlayerStore } from "../store/usePlayerStore";
+import { usePlayerStore, usePlayerStoreApi } from "../store/usePlayerStore";
 
 const PERSIST_DEBOUNCE_MS = 300;
 
@@ -12,6 +12,7 @@ const PERSIST_DEBOUNCE_MS = 300;
  * the main window was playing at rather than at the store default.
  */
 export function usePersistedPlayerVolume(): void {
+  const playerStore = usePlayerStoreApi();
   const settingsLoaded = useAppSettingsStore((state) => state.loaded);
   const volume = usePlayerStore((state) => state.volume);
   const muted = usePlayerStore((state) => state.muted);
@@ -21,7 +22,7 @@ export function usePersistedPlayerVolume(): void {
     if (hydratedRef.current || !settingsLoaded) return;
     hydratedRef.current = true;
     const storedVolume = Number(getSettingValue(SETTINGS.PLAYER_VOLUME));
-    const store = usePlayerStore.getState();
+    const store = playerStore.getState();
     if (Number.isFinite(storedVolume)) store.setVolume(storedVolume);
     store.setMuted(getSettingValue(SETTINGS.PLAYER_MUTED) === "true");
   }, [settingsLoaded]);
