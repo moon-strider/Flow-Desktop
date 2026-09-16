@@ -1,3 +1,5 @@
+import { TitleTooltip } from "../ui/TitleTooltip";
+import { useTabContext } from "../../lib/tabContext";
 import { useTabsStore } from "../../store/useTabsStore";
 import { useNavigate } from 'react-router-dom';
 import { useSubscriptionStore } from '../../store/useSubscriptionStore';
@@ -116,6 +118,10 @@ function VideoCardComponent({
   const [menuAnchor, setMenuAnchor] = useState<MenuAnchor | null>(null);
   const [dominantColor, setDominantColor] = useState<Rgb | null>(null);
   const [isHovered, setIsHovered] = useState(false);
+  const tab = useTabContext();
+  const tooltipId = React.useId();
+  const hoverPoint = useRef({ x: 0, y: 0 });
+  const [tooltipAnchor, setTooltipAnchor] = useState<{ x: number; y: number } | null>(null);
   const [thumbnailCandidateIndex, setThumbnailCandidateIndex] = useState(0);
   const cardRef = useRef<HTMLDivElement>(null);
   const thumbnailRef = useRef<HTMLImageElement>(null);
@@ -162,7 +168,26 @@ function VideoCardComponent({
   const thumbnailCandidates = resolveYoutubeThumbnailCandidates(video.id, overriddenThumbnail || video.thumbnailUrl);
   const displayThumbnail = thumbnailCandidates[thumbnailCandidateIndex] || overriddenThumbnail || video.thumbnailUrl;
 
-  const handleMouseEnter = useCallback(() => {
+  useEffect(() => {
+    if (!isHovered || showMenu || !tab.active || isChannel || isDragActive) {
+      setTooltipAnchor(null);
+      if (!tab.active) setIsHovered(false);
+      return;
+    }
+    const timer = window.setTimeout(() => setTooltipAnchor({ ...hoverPoint.current }), 200);
+    const hide = () => { window.clearTimeout(timer); setTooltipAnchor(null); };
+    const keydown = (event: KeyboardEvent) => { if (event.key === "Escape") hide(); };
+    window.addEventListener("scroll", hide, true);
+    window.addEventListener("keydown", keydown);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("scroll", hide, true);
+      window.removeEventListener("keydown", keydown);
+    };
+  }, [isHovered, showMenu, tab.active, isChannel, isDragActive, displayTitle]);
+
+  const handleMouseEnter = useCallback((event: React.MouseEvent) => {
+    hoverPoint.current = { x: event.clientX, y: event.clientY };
     setIsHovered(true);
     // getImageData is a synchronous pixel readback — cheap on GPU-composited
     // webviews, janky on Linux's CPU path (and it fires while the cursor
@@ -520,6 +545,7 @@ function VideoCardComponent({
     return (
       <div
         ref={cardRef}
+      aria-describedby={tooltipAnchor ? tooltipId : undefined}
         className={`group ${COLOR_WASH_HOST} flex w-full gap-2 rounded-xl p-1.5 -m-1.5`}
         onMouseEnter={handleMouseEnter}
         onMouseLeave={handleMouseLeave}
@@ -588,6 +614,7 @@ function VideoCardComponent({
           </button>
         </div>
 
+        {tooltipAnchor && tab.active && !showMenu && <TitleTooltip id={tooltipId} text={displayTitle} anchor={tooltipAnchor} />}
         {renderMenu()}
       </div>
     );
@@ -603,6 +630,7 @@ function VideoCardComponent({
     return (
       <div
         ref={cardRef}
+        aria-describedby={tooltipAnchor ? tooltipId : undefined}
         className={`group ${COLOR_WASH_HOST} flex w-full flex-row items-center gap-4 rounded-xl px-1 py-2`}
         onMouseEnter={handleMouseEnter}
         onMouseLeave={handleMouseLeave}
@@ -693,6 +721,7 @@ function VideoCardComponent({
           </button>
         </div>
 
+        {tooltipAnchor && tab.active && !showMenu && <TitleTooltip id={tooltipId} text={displayTitle} anchor={tooltipAnchor} />}
         {renderMenu()}
       </div>
     );
@@ -703,6 +732,7 @@ function VideoCardComponent({
   return (
     <div
       ref={cardRef}
+        aria-describedby={tooltipAnchor ? tooltipId : undefined}
       className={`video-card flex flex-col gap-3 group ${COLOR_WASH_HOST} rounded-xl p-1.5 -m-1.5`}
       onMouseEnter={handleMouseEnter}
       onMouseLeave={handleMouseLeave}
@@ -820,6 +850,7 @@ function VideoCardComponent({
         </div>
       </div>
 
+      {tooltipAnchor && tab.active && !showMenu && <TitleTooltip id={tooltipId} text={displayTitle} anchor={tooltipAnchor} />}
       {renderMenu()}
     </div>
   );
