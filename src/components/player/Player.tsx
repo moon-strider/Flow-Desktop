@@ -2561,7 +2561,7 @@ export const Player: React.FC<PlayerProps> = ({
       <PlayerGestureOverlay
         videoRef={videoRef}
         title={title}
-        src={src}
+        src={mediaIdentity || undefined}
         isPlaying={isPlaying}
         playbackRate={playbackRate}
         currentTime={currentTime}
@@ -2572,16 +2572,14 @@ export const Player: React.FC<PlayerProps> = ({
         mimeType={selectedQuality?.mimeType}
         bitrate={selectedQuality?.bitrate}
         captionCount={captions.length}
-        seekIntervalSeconds={seekIntervalSeconds}
         longPressPlaybackRate={longPressPlaybackRate}
         loopEnabled={videoLoopEnabled}
         setPlaybackRate={setPlaybackRate}
         onToggleLoop={toggleLoopSetting}
         togglePlay={togglePlay}
+        setPlaybackDesired={setPlaybackDesired}
         toggleFullscreen={toggleFullscreen}
         togglePictureInPicture={togglePictureInPicture}
-        seekTo={seekTo}
-        onSeekFeedback={showSeekFeedback}
         onRevealControls={revealControls}
         isCompact={isPipMode}
       />

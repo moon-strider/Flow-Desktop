@@ -53,16 +53,14 @@ type PlayerGestureOverlayProps = {
   mimeType?: string | null;
   bitrate?: number | null;
   captionCount?: number;
-  seekIntervalSeconds: number;
   longPressPlaybackRate: PlaybackRate;
   loopEnabled: boolean;
   setPlaybackRate: (playbackRate: PlaybackRate) => void;
   onToggleLoop: () => void;
   togglePlay: () => void;
+  setPlaybackDesired: (playing: boolean) => void;
   toggleFullscreen: () => void;
   togglePictureInPicture: () => void;
-  seekTo: (time: number) => void;
-  onSeekFeedback: (direction: PlayerSeekFeedback["direction"], seconds: number) => void;
   onRevealControls: () => void;
   isCompact?: boolean;
 };
@@ -96,16 +94,14 @@ export const PlayerGestureOverlay: React.FC<PlayerGestureOverlayProps> = ({
   mimeType,
   bitrate,
   captionCount,
-  seekIntervalSeconds,
   longPressPlaybackRate,
   loopEnabled,
   setPlaybackRate,
   onToggleLoop,
   togglePlay,
+  setPlaybackDesired,
   toggleFullscreen,
   togglePictureInPicture,
-  seekTo,
-  onSeekFeedback,
   onRevealControls,
   isCompact = false,
 }) => {
@@ -120,6 +116,13 @@ export const PlayerGestureOverlay: React.FC<PlayerGestureOverlayProps> = ({
   const previousRateRef = useRef<PlaybackRate | null>(null);
   const longPressActiveRef = useRef(false);
   const suppressClickRef = useRef(false);
+  const clickPlaybackStateRef = useRef<boolean | null>(null);
+  const playbackRef = useRef({ togglePlay, setPlaybackDesired, isPlaying });
+  playbackRef.current = { togglePlay, setPlaybackDesired, isPlaying };
+
+  useEffect(() => () => {
+    clickPlaybackStateRef.current = null;
+  }, [src]);
 
   useEffect(() => {
     if (!centerFeedback) return;
@@ -188,41 +191,44 @@ export const PlayerGestureOverlay: React.FC<PlayerGestureOverlayProps> = ({
     }, 420);
   };
 
+  const restoreClickPlayback = () => {
+    const previousPlaying = clickPlaybackStateRef.current;
+    clickPlaybackStateRef.current = null;
+    if (previousPlaying === null) return;
+    playbackRef.current.setPlaybackDesired(previousPlaying);
+  };
+
   const handleClick = (event: React.MouseEvent<HTMLDivElement>) => {
     if (event.button !== 0) return;
-    if (suppressClickRef.current) {
-      suppressClickRef.current = false;
-      return;
-    }
+    if (suppressClickRef.current) return;
     if (contextMenu) {
       setContextMenu(null);
       return;
     }
+    if (event.detail > 1) {
+      restoreClickPlayback();
+      setCenterFeedback(null);
+      return;
+    }
 
-    togglePlay();
-    setCenterFeedback({
-      id: Date.now(),
-      icon: isPlaying ? "play" : "pause",
-    });
+    const playing = playbackRef.current.isPlaying;
+    clickPlaybackStateRef.current = playing;
+    playbackRef.current.togglePlay();
+    setCenterFeedback({ id: Date.now(), icon: playing ? "play" : "pause" });
     onRevealControls();
   };
 
   const handleDoubleClick = (event: React.MouseEvent<HTMLDivElement>) => {
-    const rect = event.currentTarget.getBoundingClientRect();
-    const x = event.clientX - rect.left;
-    if (x < rect.width * 0.35) {
-      seekTo(currentTime - seekIntervalSeconds);
-      onSeekFeedback("backward", seekIntervalSeconds);
-    } else if (x > rect.width * 0.65) {
-      seekTo(currentTime + seekIntervalSeconds);
-      onSeekFeedback("forward", seekIntervalSeconds);
-    } else {
-      toggleFullscreen();
-    }
+    if (event.button !== 0 || suppressClickRef.current) return;
+    restoreClickPlayback();
+    setCenterFeedback(null);
+    toggleFullscreen();
+    onRevealControls();
   };
 
   const handleContextMenu = (event: React.MouseEvent<HTMLDivElement>) => {
     event.preventDefault();
+    clickPlaybackStateRef.current = null;
     restorePlaybackRate();
     const rect = event.currentTarget.getBoundingClientRect();
     const menuWidth = 366;
