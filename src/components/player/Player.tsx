@@ -1348,6 +1348,7 @@ export const Player: React.FC<PlayerProps> = ({
     setIsVideoFullscreenTransitioning(true);
     void syncNativeFullscreen(active).finally(() => {
       setIsFullscreen(active);
+      containerRef.current?.focus({ preventScroll: true });
       setTimeout(() => setIsVideoFullscreenTransitioning(false), FULLSCREEN_SETTLE_MS);
     });
   }, [isFullscreen, setIsFullscreen, setIsVideoFullscreenTransitioning, syncNativeFullscreen]);
@@ -2128,7 +2129,8 @@ export const Player: React.FC<PlayerProps> = ({
       const focusedPlayer = target?.closest("[data-flow-player-root]");
       if (focusedPlayer && focusedPlayer !== containerRef.current) return;
       if (!tab.active && focusedPlayer !== containerRef.current) return;
-      if (target?.closest("button, [role=tab]")) return;
+      if (target?.closest("[role=tab]")) return;
+      if (target?.closest("button") && (event.key === " " || event.key === "Enter")) return;
       if (target?.tagName === "INPUT" || target?.tagName === "TEXTAREA" || target?.isContentEditable) return;
       if (event.ctrlKey || event.metaKey || event.altKey) return;
 
@@ -2466,6 +2468,11 @@ export const Player: React.FC<PlayerProps> = ({
   return (
     <div
       ref={containerRef}
+      onPointerDownCapture={(event) => {
+        if (!(event.target as Element).closest("button, input, select, textarea, [contenteditable=true]")) {
+          event.currentTarget.focus({ preventScroll: true });
+        }
+      }}
       data-flow-player-root
       data-fullscreen={isFullscreen || undefined}
       className={cx(
