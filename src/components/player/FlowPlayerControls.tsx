@@ -517,7 +517,6 @@ export const FlowPlayerControls: React.FC<FlowPlayerControlsProps> = ({
               handlePointerSeek(event.clientX);
             }}
             onMouseUp={() => setIsScrubbing(false)}
-            onClick={(event) => handlePointerSeek(event.clientX)}
           >
             {/* Split Chapter Seekbar Track — the whole track springs taller on hover/scrub, mirroring the mobile seekbar. */}
             <div className="relative flex h-full w-full select-none items-center gap-[3px] pointer-events-none">
