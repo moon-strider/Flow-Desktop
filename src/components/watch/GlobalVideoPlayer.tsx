@@ -86,6 +86,44 @@ export function GlobalVideoPlayer() {
   useMediaSessionMetadata(!isPoppedOut);
 
   useEffect(() => {
+    const frame = frameRef.current;
+    if (!frame || isFloating || isPoppedOut || isVideoFullscreen || !currentVideo) return;
+
+    const handleWheel = (event: WheelEvent) => {
+      if (event.defaultPrevented || event.ctrlKey || event.metaKey) return;
+
+      for (
+        let target = event.target instanceof Element ? event.target : null;
+        target && target !== frame;
+        target = target.parentElement
+      ) {
+        const style = window.getComputedStyle(target);
+        if (
+          (/^(auto|scroll)$/.test(style.overflowY) && target.scrollHeight > target.clientHeight)
+          || (/^(auto|scroll)$/.test(style.overflowX) && target.scrollWidth > target.clientWidth)
+        ) return;
+      }
+
+      const slot = document.querySelector<HTMLElement>("[data-flow-watch-player-slot='true']");
+      const scrollContainer = slot?.closest("main");
+      if (!scrollContainer) return;
+
+      const lineHeight = Number.parseFloat(window.getComputedStyle(scrollContainer).lineHeight) || 16;
+      const scaleY = event.deltaMode === 1 ? lineHeight : event.deltaMode === 2 ? scrollContainer.clientHeight : 1;
+      const scaleX = event.deltaMode === 1 ? lineHeight : event.deltaMode === 2 ? scrollContainer.clientWidth : 1;
+      event.preventDefault();
+      scrollContainer.scrollBy({
+        top: event.deltaY * scaleY,
+        left: event.deltaX * scaleX,
+        behavior: "instant",
+      });
+    };
+
+    frame.addEventListener("wheel", handleWheel, { passive: false });
+    return () => frame.removeEventListener("wheel", handleWheel);
+  }, [currentVideo, isFloating, isPoppedOut, isVideoFullscreen, location.pathname]);
+
+  useEffect(() => {
     if (isFloating || isPoppedOut || isVideoFullscreen || !currentVideo) return;
 
     const writeFrameBounds = (bounds: PlayerBounds) => {

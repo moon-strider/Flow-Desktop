@@ -191,6 +191,7 @@ export const FlowPlayerControls: React.FC<FlowPlayerControlsProps> = ({
   const [settingsPane, setSettingsPane] = useState<SettingsPane>("root");
   const [submitDialogOpen, setSubmitDialogOpen] = useState(false);
   const [submitAtSeconds, setSubmitAtSeconds] = useState(0);
+  const volumeControlRef = useRef<HTMLDivElement>(null);
   const chapterPillRef = useRef<HTMLButtonElement>(null);
   const progressBarRef = useRef<HTMLDivElement>(null);
   const playheadRef = useRef<HTMLDivElement>(null);
@@ -200,6 +201,29 @@ export const FlowPlayerControls: React.FC<FlowPlayerControlsProps> = ({
   const hoverSegmentRef = useRef<HTMLSpanElement>(null);
   const hoverSegmentDotRef = useRef<HTMLSpanElement>(null);
   const hoverSegmentLabelRef = useRef<HTMLSpanElement>(null);
+
+  useEffect(() => {
+    const control = volumeControlRef.current;
+    if (!control) return;
+
+    const handleWheel = (event: WheelEvent) => {
+      if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.deltaY === 0) return;
+      event.preventDefault();
+      event.stopPropagation();
+
+      const scale = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? window.innerHeight : 1;
+      const delta = Math.sign(event.deltaY) * Math.min(0.05, Math.abs(event.deltaY * scale) * 0.0005);
+      const state = usePlayerStore.getState();
+      const currentVolume = state.muted ? 0 : state.volume;
+      const nextVolume = Math.min(1, Math.max(0, currentVolume - delta));
+      if (nextVolume === currentVolume) return;
+      setVolume(nextVolume);
+      setMuted(nextVolume === 0);
+    };
+
+    control.addEventListener("wheel", handleWheel, { passive: false });
+    return () => control.removeEventListener("wheel", handleWheel);
+  }, [setMuted, setVolume]);
 
   const segments = React.useMemo(() => {
     if (isLive || !chapters || chapters.length === 0) {
@@ -628,7 +652,7 @@ export const FlowPlayerControls: React.FC<FlowPlayerControlsProps> = ({
                 <SkipForward size={19} fill="currentColor" />
               </button>
 
-              <div className="group/volume hidden items-center sm:flex bg-chrome-black/20 rounded-full hover:pr-2">
+              <div ref={volumeControlRef} className="group/volume hidden items-center sm:flex bg-chrome-black/20 rounded-full hover:pr-2">
                 <button
                   type="button"
                   title="Mute"

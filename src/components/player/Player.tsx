@@ -2463,6 +2463,7 @@ export const Player: React.FC<PlayerProps> = ({
       onPointerEnter={handlePointerEnter}
       onPointerMove={revealControls}
       onPointerDown={revealControls}
+      onWheelCapture={revealControls}
       onPointerLeave={handlePointerLeave}
       onFocusCapture={handleFocusCapture}
       onBlurCapture={handleBlurCapture}
