@@ -1,3 +1,4 @@
+import { logToBackend } from "./diagnostics";
 import { useTabContext } from "./tabContext";
 import { useTabsStore } from "../store/useTabsStore";
 import { useEffect, useRef } from "react";
@@ -7,6 +8,7 @@ import { useNavigate } from "react-router-dom";
 import { usePlayerStoreApi } from "../store/usePlayerStore";
 import {
   PIP_EVENTS,
+  focusMainWindow,
   type PipHandbackPayload,
   type PipProgressPayload,
   type PipVideoChangedPayload,
@@ -49,15 +51,17 @@ export function usePipController() {
         }
 
         const playing = payload.playing;
+        void logToBackend("info", "pop-out playback returned", { playing, expand: payload.expand });
         store.setPipHandoff(video.id, payload.positionSeconds, playing);
         store.setIsPlaying(playing);
         store.setCurrentTime(payload.positionSeconds);
         if (Number.isFinite(payload.volume)) store.setVolume(payload.volume);
         store.setMuted(payload.muted);
         store.expandVideoPlayer();
-        if (payload.expand) {
+        if (payload.expand || playing) {
           if (tab.id) useTabsStore.getState().activateTab(tab.id);
           navigateRef.current(`/watch/${video.id}`);
+          if (!payload.expand) await focusMainWindow().catch(() => {});
         }
       }),
     ];

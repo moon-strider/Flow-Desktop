@@ -1,3 +1,4 @@
+import { logToBackend } from "../diagnostics";
 import type { StreamInfo, VideoSummary } from "../../types/video";
 import { invokeBackend } from "./errors";
 
@@ -91,5 +92,6 @@ export function markPipWindowReady(): Promise<void> {
 }
 
 export function focusMainWindow(): Promise<void> {
+  void logToBackend("info", "main window focus requested by pop-out");
   return invokeBackend("focus_main_window");
 }

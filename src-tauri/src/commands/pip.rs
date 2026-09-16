@@ -182,14 +182,53 @@ pub fn pip_session(state: State<'_, PipState>) -> Result<Option<PipSession>, Err
     state.read()
 }
 
-/// Closes the pop-out. The window's own close handler still runs, so the
-/// playback position is handed back to the main window first.
 #[tauri::command]
-pub fn close_pip_window<R: Runtime>(app: AppHandle<R>) -> Result<(), ErrorResponse> {
+pub async fn close_pip_window<R: Runtime>(app: AppHandle<R>) -> Result<(), ErrorResponse> {
     if let Some(window) = app.get_webview_window(PIP_WINDOW_LABEL) {
-        window.close().map_err(|error| {
+        let (closed, wait_closed) = tokio::sync::oneshot::channel();
+        let closed = std::sync::Mutex::new(Some(closed));
+        window.on_window_event(move |event| {
+            if matches!(event, WindowEvent::Destroyed) {
+                if let Ok(mut closed) = closed.lock() {
+                    if let Some(closed) = closed.take() {
+                        let _ = closed.send(());
+                    }
+                }
+            }
+        });
+        #[cfg(target_os = "macos")]
+        let main_window = app.get_webview_window("main");
+        #[cfg(target_os = "macos")]
+        if let Some(main) = main_window.as_ref() {
+            main.set_focusable(false).map_err(|error| {
+                ErrorResponse::from(AppError::Internal(format!(
+                    "Failed to preserve main-window focus while closing PiP: {error}"
+                )))
+            })?;
+            let main = main.clone();
+            window.on_window_event(move |event| {
+                if matches!(event, WindowEvent::Destroyed) {
+                    let _ = main.set_focusable(true);
+                    tracing::info!(
+                        main_focused = main.is_focused().unwrap_or(false),
+                        main_minimized = main.is_minimized().unwrap_or(false),
+                        "pip_window_closed_without_focus"
+                    );
+                }
+            });
+        }
+        window.destroy().map_err(|error| {
+            #[cfg(target_os = "macos")]
+            if let Some(main) = main_window.as_ref() {
+                let _ = main.set_focusable(true);
+            }
             ErrorResponse::from(AppError::Internal(format!(
                 "Failed to close the pop-out player window: {error}"
+            )))
+        })?;
+        wait_closed.await.map_err(|error| {
+            ErrorResponse::from(AppError::Internal(format!(
+                "Failed to finish closing the pop-out player window: {error}"
             )))
         })?;
     }

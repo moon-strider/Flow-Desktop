@@ -5,12 +5,14 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useAppSettingsStore, setSettingValue } from "../store/useAppSettingsStore";
 import { useSettingsStore } from "../store/useSettingsStore";
 import { usePlayerStore } from "../store/usePlayerStore";
+import { logToBackend } from "./diagnostics";
 import { seekToTime } from "./linkify";
 import { SETTINGS } from "./settings/schema";
 import { PIP_RETURN_REQUEST_EVENT } from "./pipHandoff";
 import { primeStreamInfo } from "./streamResolution";
 import {
   PIP_EVENTS,
+  closePipWindow,
   focusMainWindow,
   getPipSession,
   markPipWindowReady,
@@ -196,6 +198,7 @@ export function usePipSession() {
   const handBack = useCallback((expand: boolean) => {
     const { currentVideo, currentTime, isPlaying, volume, muted } = usePlayerStore.getState();
     if (!currentVideo) return Promise.resolve();
+    void logToBackend("info", "pop-out playback handback", { videoId: currentVideo.id, playing: isPlaying, expand });
     return emit(PIP_EVENTS.handback, {
       videoId: currentVideo.id,
       positionSeconds: currentTime,
@@ -226,8 +229,10 @@ export function usePipSession() {
 
     try {
       void getCurrentWindow()
-        .onCloseRequested(async () => {
+        .onCloseRequested(async (event) => {
+          event.preventDefault();
           await handBack(false);
+          await closePipWindow().catch(() => {});
         })
         .then((dispose) => {
           if (disposed) dispose();
