@@ -8,6 +8,7 @@ pub mod music_brain;
 pub mod notifications;
 pub mod pip;
 pub mod recommendation;
+pub mod sabr;
 pub mod shorts;
 pub mod sync;
 pub mod window;

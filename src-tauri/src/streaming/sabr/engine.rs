@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 use serde::Serialize;
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, watch};
 use tracing::{debug, info, warn};
 
 use super::messages::FormatId;
@@ -38,6 +38,7 @@ pub struct SabrEngineConfig {
     pub mode: RequestMode,
     // Max bytes held per session before the loop pauses for demand.
     pub max_buffer_bytes: usize,
+    pub prefetch_segments: i32,
     // How long a consumer waits for a specific init/segment before giving up.
     pub segment_wait: Duration,
     // Max consecutive retryable errors before failing the session.
@@ -49,6 +50,7 @@ impl Default for SabrEngineConfig {
         Self {
             mode: RequestMode::AudioVideo,
             max_buffer_bytes: 256 * 1024 * 1024,
+            prefetch_segments: 4,
             segment_wait: Duration::from_secs(10),
             max_retries: 5,
         }
@@ -73,12 +75,14 @@ struct TrackBuffer {
     end_seq: i64,
     total_ms: i64,
     initialized: bool,
+    demand_seq: i32,
 }
 
 impl TrackBuffer {
     fn new() -> Self {
         Self {
             max_seq: -1,
+            demand_seq: 1,
             ..Default::default()
         }
     }
@@ -165,9 +169,36 @@ pub struct SabrEngine {
     notify_demand: Notify,
     format_ready: Notify,
     cancelled: AtomicBool,
+    finished: AtomicBool,
+    cancel_signal: watch::Sender<bool>,
     started: AtomicBool,
     request_counter: AtomicU64,
     restart_request: AtomicBool,
+    pending_segments: std::sync::Mutex<BTreeMap<(bool, i32), PendingRequest>>,
+    demand_counter: AtomicU64,
+}
+
+struct PendingRequest {
+    count: usize,
+    order: u64,
+}
+
+struct SegmentDemand<'a> {
+    engine: &'a SabrEngine,
+    key: (bool, i32),
+}
+
+impl Drop for SegmentDemand<'_> {
+    fn drop(&mut self) {
+        let mut pending = self.engine.pending_segments.lock().unwrap();
+        if let Some(request) = pending.get_mut(&self.key) {
+            request.count -= 1;
+            if request.count == 0 {
+                pending.remove(&self.key);
+            }
+        }
+        self.engine.notify_demand.notify_one();
+    }
 }
 
 impl SabrEngine {
@@ -213,6 +244,7 @@ impl SabrEngine {
 
         let client = reqwest::Client::builder()
             .pool_idle_timeout(Duration::from_secs(60))
+            .connect_timeout(Duration::from_secs(15))
             .build()
             .unwrap_or_default();
 
@@ -235,9 +267,13 @@ impl SabrEngine {
             notify_demand: Notify::new(),
             format_ready: Notify::new(),
             cancelled: AtomicBool::new(false),
+            finished: AtomicBool::new(false),
+            cancel_signal: watch::channel(false).0,
             started: AtomicBool::new(false),
             request_counter: AtomicU64::new(0),
             restart_request: AtomicBool::new(false),
+            pending_segments: std::sync::Mutex::new(BTreeMap::new()),
+            demand_counter: AtomicU64::new(0),
         }
     }
 
@@ -251,19 +287,98 @@ impl SabrEngine {
             return;
         }
         let engine = self.clone();
+        let mut cancelled = self.cancel_signal.subscribe();
         tokio::spawn(async move {
-            engine.run().await;
+            tokio::select! {
+                biased;
+                _ = async { let _ = cancelled.wait_for(|value| *value).await; } => {}
+                _ = engine.clone().run() => {}
+            }
+            if engine.is_cancelled() {
+                let mut store = engine.store.lock().await;
+                store.audio = TrackBuffer::new();
+                store.video = TrackBuffer::new();
+                store.bytes_used = 0;
+                store.done = true;
+                store.last_error = Some(SabrError::Cancelled);
+                drop(store);
+                engine.notify_data.notify_waiters();
+                engine.format_ready.notify_waiters();
+            }
+            engine.finished.store(true, Ordering::SeqCst);
         });
     }
 
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
+        self.cancel_signal.send_replace(true);
         self.notify_demand.notify_waiters();
         self.notify_data.notify_waiters();
+        self.format_ready.notify_waiters();
     }
 
     fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::SeqCst)
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.finished.load(Ordering::SeqCst) || self.is_cancelled()
+    }
+
+    async fn needs_data(&self) -> bool {
+        let store = self.store.lock().await;
+        if self.pending_target(&store).is_some() {
+            return true;
+        }
+        let needs_track = |track: &TrackBuffer| {
+            let target = track
+                .demand_seq
+                .saturating_add(self.config.prefetch_segments);
+            let target = if track.end_seq > 0 {
+                i64::from(target).min(track.end_seq)
+            } else {
+                i64::from(target)
+            };
+            track.init.is_none() || !track.initialized || i64::from(track.max_seq) < target
+        };
+        needs_track(&store.audio)
+            || (self.config.mode == RequestMode::AudioVideo && needs_track(&store.video))
+    }
+
+    fn pending_target(&self, store: &Store) -> Option<(SabrTrack, i32)> {
+        self.pending_segments
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|((audio, sequence), _)| {
+                let track = if *audio { &store.audio } else { &store.video };
+                !track.segments.contains_key(sequence)
+                    && (track.end_seq == 0 || i64::from(*sequence) <= track.end_seq)
+            })
+            .min_by_key(|(_, request)| request.order)
+            .map(|((audio, sequence), _)| {
+                (
+                    if *audio {
+                        SabrTrack::Audio
+                    } else {
+                        SabrTrack::Video
+                    },
+                    *sequence,
+                )
+            })
+    }
+
+    async fn needs_retarget(&self) -> bool {
+        let store = self.store.lock().await;
+        self.pending_target(&store)
+            .is_some_and(|(track, sequence)| {
+                let buffer = store.track(track);
+                sequence <= buffer.max_seq
+                    || sequence
+                        > buffer
+                            .max_seq
+                            .saturating_add(self.config.prefetch_segments.max(1))
+            })
     }
 
     // --- background loop ------------------------------------------------------
@@ -278,14 +393,11 @@ impl SabrEngine {
                 break;
             }
 
+            self.prepare_next_request().await;
+
             // Backpressure: if we're holding a lot of media, wait for demand.
-            let over_cap = {
-                let store = self.store.lock().await;
-                store.bytes_used > self.config.max_buffer_bytes
-            };
-            if over_cap {
-                let _ = tokio::time::timeout(Duration::from_secs(2), self.notify_demand.notified())
-                    .await;
+            if !self.needs_data().await {
+                self.notify_demand.notified().await;
                 continue;
             }
 
@@ -293,7 +405,8 @@ impl SabrEngine {
                 Ok(should_continue) => {
                     consecutive_errors = 0;
                     if !should_continue {
-                        break;
+                        self.notify_demand.notified().await;
+                        continue;
                     }
                 }
                 // The server grants a short grace window then demands fresh
@@ -385,9 +498,9 @@ impl SabrEngine {
             }
         }
 
-        let resp = req
-            .send()
+        let resp = tokio::time::timeout(Duration::from_secs(20), req.send())
             .await
+            .map_err(|_| SabrError::Network("SABR response headers timed out".to_string()))?
             .map_err(|e| SabrError::Network(e.to_string()))?;
         let status = resp.status();
         if !status.is_success() {
@@ -408,18 +521,25 @@ impl SabrEngine {
         let mut chunk_count = 0u64;
         let mut byte_count = 0u64;
         loop {
-            let over_cap = { self.store.lock().await.bytes_used > self.config.max_buffer_bytes };
-            if over_cap {
+            if !self.needs_data().await {
                 debug!(session = %self.session_id, rn, byte_count, "sabr_buffer_full");
                 break;
             }
             // An audio-language switch ends this cycle so the next one re-requests
             // with the newly-selected track.
-            if self.restart_request.swap(false, Ordering::SeqCst) {
+            if self.restart_request.swap(false, Ordering::SeqCst) || self.needs_retarget().await {
                 debug!(session = %self.session_id, rn, "sabr_restart_for_audio_switch");
                 break;
             }
-            let next = tokio::time::timeout(SABR_STREAM_IDLE, stream.next()).await;
+            let next = tokio::select! {
+                next = tokio::time::timeout(SABR_STREAM_IDLE, stream.next()) => next,
+                _ = self.notify_demand.notified() => {
+                    if self.restart_request.swap(false, Ordering::SeqCst) || self.needs_retarget().await {
+                        break;
+                    }
+                    continue;
+                }
+            };
             let chunk = match next {
                 Ok(Some(chunk)) => chunk,
                 Ok(None) => {
@@ -437,16 +557,29 @@ impl SabrEngine {
             let chunk = chunk.map_err(|_| SabrError::RemoteReset)?;
             chunk_count += 1;
             byte_count += chunk.len() as u64;
-            parser.push(&chunk);
-            while let Some(part) = parser.next_part() {
-                if let Some(action) = self
-                    .dispatch_part(part.part_type, &part.data, &mut headers, &mut accums)
-                    .await?
-                {
-                    match action {
-                        CycleAction::Reload => return Err(SabrError::ReloadRequired),
-                        CycleAction::Stop => return Ok(false),
+            for payload in chunk.chunks(self.config.max_buffer_bytes.clamp(1, 64 * 1024)) {
+                parser.push(payload);
+                while let Some(part) = parser.next_part() {
+                    if let Some(action) = self
+                        .dispatch_part(part.part_type, &part.data, &mut headers, &mut accums)
+                        .await?
+                    {
+                        match action {
+                            CycleAction::Reload => return Err(SabrError::ReloadRequired),
+                            CycleAction::Stop => return Ok(false),
+                        }
                     }
+                    if !self.needs_data().await {
+                        return Ok(true);
+                    }
+                    if part.part_type == ump::MEDIA_END && self.needs_retarget().await {
+                        return Ok(true);
+                    }
+                }
+                if parser.buffered_len() > self.config.max_buffer_bytes {
+                    return Err(SabrError::UmpDecode(
+                        "SABR frame exceeds buffer budget".to_string(),
+                    ));
                 }
             }
         }
@@ -494,10 +627,15 @@ impl SabrEngine {
                 if let Some((header_id, consumed)) = ump::read_varint(data) {
                     let payload = &data[consumed..];
                     if headers.contains_key(&header_id) {
-                        accums
-                            .entry(header_id)
-                            .or_default()
-                            .extend_from_slice(payload);
+                        let accumulated = accums.entry(header_id).or_default();
+                        if accumulated.len().saturating_add(payload.len())
+                            > self.config.max_buffer_bytes
+                        {
+                            return Err(SabrError::UmpDecode(
+                                "SABR segment exceeds buffer budget".to_string(),
+                            ));
+                        }
+                        accumulated.extend_from_slice(payload);
                     }
                 }
             }
@@ -632,18 +770,21 @@ impl SabrEngine {
         {
             let mut store = self.store.lock().await;
             let added = bytes.len();
-            {
+            let replaced = {
                 let tb = store.track_mut(track);
                 if info.is_init {
-                    tb.init = Some(bytes);
+                    tb.init.replace(bytes)
                 } else {
                     if info.sequence > tb.max_seq {
                         tb.max_seq = info.sequence;
                     }
-                    tb.segments.insert(info.sequence, bytes);
+                    tb.segments.insert(info.sequence, bytes)
                 }
-            }
-            store.bytes_used = store.bytes_used.saturating_add(added);
+            };
+            store.bytes_used = store
+                .bytes_used
+                .saturating_sub(replaced.as_ref().map_or(0, Vec::len))
+                .saturating_add(added);
             self.evict_if_needed(&mut store);
         }
 
@@ -651,30 +792,45 @@ impl SabrEngine {
         self.notify_data.notify_waiters();
     }
 
-    // Evict oldest non-init segments when over the buffer ceiling. Never evicts
-    // init segments or the most recent segment of a track.
     fn evict_if_needed(&self, store: &mut Store) {
-        while store.bytes_used > self.config.max_buffer_bytes {
-            // Find the track with the most segments and drop its lowest-seq one.
-            let drop_audio = store.audio.segments.len() >= store.video.segments.len();
-            let track = if drop_audio {
-                SabrTrack::Audio
-            } else {
-                SabrTrack::Video
-            };
-            let removed = {
-                let tb = store.track_mut(track);
-                if tb.segments.len() <= 1 {
-                    None
-                } else if let Some((&seq, _)) = tb.segments.iter().next() {
-                    tb.segments.remove(&seq).map(|b| b.len())
+        let pending = self.pending_segments.lock().unwrap();
+        for kind in [SabrTrack::Audio, SabrTrack::Video] {
+            let buffer = store.track_mut(kind);
+            let oldest = buffer.demand_seq.saturating_sub(12);
+            let mut freed = 0;
+            buffer.segments.retain(|sequence, bytes| {
+                if *sequence >= oldest
+                    || pending.contains_key(&(kind == SabrTrack::Audio, *sequence))
+                {
+                    true
                 } else {
-                    None
+                    freed += bytes.len();
+                    false
                 }
+            });
+            store.bytes_used = store.bytes_used.saturating_sub(freed);
+        }
+        drop(pending);
+        while store.bytes_used > self.config.max_buffer_bytes {
+            let pending = self.pending_segments.lock().unwrap();
+            let oldest = [SabrTrack::Audio, SabrTrack::Video]
+                .into_iter()
+                .flat_map(|kind| {
+                    store
+                        .track(kind)
+                        .segments
+                        .keys()
+                        .map(move |sequence| (kind, *sequence))
+                })
+                .filter(|(kind, sequence)| {
+                    !pending.contains_key(&(*kind == SabrTrack::Audio, *sequence))
+                })
+                .min_by_key(|(_, sequence)| *sequence);
+            let Some((track, sequence)) = oldest else {
+                break;
             };
-            match removed {
-                Some(len) => store.bytes_used = store.bytes_used.saturating_sub(len),
-                None => break,
+            if let Some(bytes) = store.track_mut(track).segments.remove(&sequence) {
+                store.bytes_used = store.bytes_used.saturating_sub(bytes.len());
             }
         }
     }
@@ -752,33 +908,39 @@ impl SabrEngine {
         true
     }
 
-    pub async fn ensure_audio_segment(&self, segment: i32) {
-        let (needs_seek, seg_dur) = {
-            let store = self.store.lock().await;
-            let a = &store.audio;
-            let have = a.segments.contains_key(&segment);
-            let far_ahead = segment > a.max_seq.saturating_add(4) || (a.max_seq < 0 && segment > 2);
-            let seg_dur = if a.end_seq > 0 && a.total_ms > 0 {
-                a.total_ms / a.end_seq
-            } else if self.descriptor.duration_ms > 0 {
-                // Fall back to the audio segment cadence from the descriptor duration.
-                (self.descriptor.duration_ms as i64 / 300).max(1000)
+    async fn prepare_next_request(&self) {
+        let mut store = self.store.lock().await;
+        let Some((track, sequence)) = self.pending_target(&store) else {
+            return;
+        };
+        let duration = |buffer: &TrackBuffer| {
+            if buffer.end_seq > 0 && buffer.total_ms > 0 {
+                (buffer.total_ms / buffer.end_seq).max(1)
             } else {
                 5000
-            };
-            (!have && far_ahead, seg_dur)
-        };
-        if needs_seek {
-            let target = i64::from(segment.saturating_sub(1)).max(0) * seg_dur;
-            {
-                let mut st = self.state.lock().await;
-                st.seek_audio_to(target);
             }
-            // Interrupt the in-flight cycle so the next request fetches from the
-            // seek target instead of continuing the sequential stream.
-            self.restart_request.store(true, Ordering::SeqCst);
-            debug!(session = %self.session_id, segment, target_ms = target, "sabr_audio_seek");
-            self.notify_demand.notify_one();
+        };
+        let buffer = store.track_mut(track);
+        buffer.demand_seq = sequence.max(1);
+        let needs_seek = sequence <= buffer.max_seq
+            || sequence
+                > buffer
+                    .max_seq
+                    .saturating_add(self.config.prefetch_segments.max(1));
+        if needs_seek {
+            let target = i64::from(sequence.saturating_sub(1)).max(0) * duration(buffer);
+            for kind in [SabrTrack::Audio, SabrTrack::Video] {
+                let buffer = store.track_mut(kind);
+                let next_sequence = (target / duration(buffer))
+                    .saturating_add(1)
+                    .min(i64::from(i32::MAX)) as i32;
+                buffer.demand_seq = next_sequence;
+                buffer.max_seq = next_sequence.saturating_sub(1);
+            }
+            drop(store);
+            self.state.lock().await.seek_to(target);
+        } else {
+            drop(store);
         }
     }
 
@@ -788,6 +950,12 @@ impl SabrEngine {
     pub async fn get_init(&self, track: SabrTrack) -> SabrResult<Vec<u8>> {
         let deadline = Instant::now() + self.config.segment_wait;
         loop {
+            let notified = self.notify_data.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.is_cancelled() {
+                return Err(SabrError::Cancelled);
+            }
             {
                 let store = self.store.lock().await;
                 if let Some(bytes) = store.track(track).init.clone() {
@@ -804,7 +972,7 @@ impl SabrEngine {
             match deadline.checked_duration_since(Instant::now()) {
                 None => return Err(SabrError::SegmentTimeout),
                 Some(rem) => {
-                    let _ = tokio::time::timeout(rem, self.notify_data.notified()).await;
+                    let _ = tokio::time::timeout(rem, notified).await;
                 }
             }
         }
@@ -812,12 +980,40 @@ impl SabrEngine {
 
     // Wait for a specific segment by sequence number.
     pub async fn get_segment(&self, track: SabrTrack, sequence: i32) -> SabrResult<Vec<u8>> {
+        if self.is_cancelled() {
+            return Err(SabrError::Cancelled);
+        }
+        if sequence < 1 {
+            return Err(SabrError::SegmentTimeout);
+        }
+        let end = self.store.lock().await.track(track).end_seq;
+        if end > 0 && i64::from(sequence) > end {
+            return Err(SabrError::SegmentTimeout);
+        }
+        let key = (track == SabrTrack::Audio, sequence);
+        self.pending_segments
+            .lock()
+            .unwrap()
+            .entry(key)
+            .or_insert_with(|| PendingRequest {
+                count: 0,
+                order: self.demand_counter.fetch_add(1, Ordering::Relaxed),
+            })
+            .count += 1;
+        let _demand = SegmentDemand { engine: self, key };
+        self.notify_demand.notify_one();
         let deadline = Instant::now() + self.config.segment_wait;
         loop {
+            let notified = self.notify_data.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.is_cancelled() {
+                return Err(SabrError::Cancelled);
+            }
             {
-                let store = self.store.lock().await;
-                let tb = store.track(track);
-                if let Some(bytes) = tb.segments.get(&sequence).cloned() {
+                let mut store = self.store.lock().await;
+                if let Some(bytes) = store.track(track).segments.get(&sequence).cloned() {
+                    store.track_mut(track).demand_seq = sequence.max(1);
                     return Ok(bytes);
                 }
                 if let Some(err) = &store.last_error {
@@ -825,6 +1021,7 @@ impl SabrEngine {
                         return Err(err.clone());
                     }
                 }
+                let tb = store.track(track);
                 // Past the end of the track: this segment will never arrive.
                 if tb.end_seq > 0 && i64::from(sequence) > tb.end_seq {
                     return Err(SabrError::SegmentTimeout);
@@ -837,10 +1034,14 @@ impl SabrEngine {
             match deadline.checked_duration_since(Instant::now()) {
                 None => return Err(SabrError::SegmentTimeout),
                 Some(rem) => {
-                    let _ = tokio::time::timeout(rem, self.notify_data.notified()).await;
+                    let _ = tokio::time::timeout(rem, notified).await;
                 }
             }
         }
+    }
+
+    pub async fn ensure_audio_segment(&self, sequence: i32) {
+        let _ = self.get_segment(SabrTrack::Audio, sequence).await;
     }
 
     // Wait until both tracks report format-initialization metadata (so a
@@ -848,6 +1049,12 @@ impl SabrEngine {
     pub async fn wait_timing(&self, timeout: Duration) -> SabrResult<SabrTiming> {
         let deadline = Instant::now() + timeout;
         loop {
+            let notified = self.format_ready.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.is_cancelled() {
+                return Err(SabrError::Cancelled);
+            }
             {
                 let store = self.store.lock().await;
                 if let Some(err) = &store.last_error {
@@ -863,7 +1070,7 @@ impl SabrEngine {
             match deadline.checked_duration_since(Instant::now()) {
                 None => return Err(SabrError::SegmentTimeout),
                 Some(rem) => {
-                    let _ = tokio::time::timeout(rem, self.format_ready.notified()).await;
+                    let _ = tokio::time::timeout(rem, notified).await;
                 }
             }
         }

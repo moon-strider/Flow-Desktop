@@ -61,6 +61,7 @@ use commands::pip::{
     PIP_WINDOW_LABEL, PipState, close_pip_window, focus_main_window, open_pip_window, pip_session,
     pip_window_ready, set_pip_always_on_top,
 };
+use commands::sabr::{acquire_sabr_session, touch_sabr_session, release_sabr_session};
 use commands::recommendation::{
     add_blocked_topic, add_preferred_topic, block_channel, complete_onboarding,
     generate_discovery_queries, get_brain_snapshot, get_feed_quotas, get_flow_persona,
@@ -359,6 +360,9 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            acquire_sabr_session,
+            touch_sabr_session,
+            release_sabr_session,
             search_videos,
             get_video_details,
             get_related_videos,

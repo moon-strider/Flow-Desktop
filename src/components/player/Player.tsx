@@ -30,6 +30,7 @@ import {
   decideExternalAudioSync,
 } from "../../lib/externalAudioSync";
 import { useSubtitleSettingsSync } from "../../lib/useSubtitleSettingsSync";
+import { useSabrSession } from "../../lib/useSabrSession";
 import { openPopoutPlayer, returnOtherPopout } from "../../lib/pipHandoff";
 import {
   formatPlaybackRate,
@@ -1034,6 +1035,9 @@ export const Player: React.FC<PlayerProps> = ({
     onRetrySourceRef.current?.(reason);
   }, [sourceMode]);
   const fireRetrySourceRef = useRef(fireRetrySource);
+  const sabrSessionReady = useSabrSession(isDashPlayback ? dashManifestUrl : null, () => {
+    fireRetrySourceRef.current("sabr:session-expired");
+  });
   useEffect(() => {
     fireRetrySourceRef.current = fireRetrySource;
   }, [fireRetrySource]);
@@ -1541,7 +1545,7 @@ export const Player: React.FC<PlayerProps> = ({
     const video = videoRef.current;
     if (!video) return;
 
-    if (!isDashPlayback || !dashManifestUrl) {
+    if (!isDashPlayback || !dashManifestUrl || !sabrSessionReady) {
       dashReadyRef.current = false;
       dashPlayerRef.current?.destroy();
       dashPlayerRef.current = null;
@@ -1734,7 +1738,7 @@ export const Player: React.FC<PlayerProps> = ({
         dashPlayerRef.current = null;
       }
     };
-  }, [bufferConfig, dashManifestUrl, dashProxyPrefix, isDashPlayback]);
+  }, [bufferConfig, dashManifestUrl, dashProxyPrefix, isDashPlayback, sabrSessionReady]);
 
   useEffect(() => {
     const video = videoRef.current;

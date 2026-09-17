@@ -1304,7 +1304,6 @@ async fn handle_sabr_route(
                 )
                 .await;
             };
-            engine.ensure_audio_segment(sequence).await;
             match engine.get_segment(SabrTrack::Audio, sequence).await {
                 Ok(bytes) => {
                     write_full_body(socket, audio_ct(key), "no-store", &bytes, head_only).await

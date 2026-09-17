@@ -114,48 +114,32 @@ impl SabrTrack {
     }
 }
 
-// A live SABR session: handle to its engine plus bookkeeping.
 pub struct SabrSessionHandle {
     pub session_id: String,
     pub video_id: String,
     pub engine: Arc<SabrEngine>,
-    created_at: Instant,
-    last_access: Mutex<Instant>,
-    expires_in_seconds: u64,
+    prepared_at: Instant,
 }
 
-impl SabrSessionHandle {
-    fn touch(&self) {
-        if let Ok(mut last) = self.last_access.lock() {
-            *last = Instant::now();
-        }
-    }
-
-    fn is_expired(&self, idle_ttl: Duration) -> bool {
-        let hard_cap = Duration::from_secs(self.expires_in_seconds.max(60).min(3600));
-        if self.created_at.elapsed() > hard_cap {
-            return true;
-        }
-        match self.last_access.lock() {
-            Ok(last) => last.elapsed() > idle_ttl,
-            Err(_) => false,
-        }
-    }
+struct PreparedSession {
+    descriptor: SabrSessionDescriptor,
+    support: CodecSupport,
+    prepared_at: Instant,
 }
 
-// Owns SABR sessions. Descriptors are *prepared* cheaply (no network) when a
-// stream is resolved, then *activated* lazily — the engine only starts hitting
-// YouTube once the player actually fetches the manifest/segments. This keeps
-// SABR a zero-cost fallback until it is genuinely used.
+#[derive(Default)]
+struct SessionRegistry {
+    sessions: HashMap<String, Arc<SabrSessionHandle>>,
+    prepared: HashMap<String, PreparedSession>,
+    leases: HashMap<String, HashMap<String, Instant>>,
+}
+
 #[derive(Clone)]
 pub struct SabrSessionManager {
-    sessions: Arc<Mutex<HashMap<String, Arc<SabrSessionHandle>>>>,
-    prepared: Arc<Mutex<HashMap<String, (SabrSessionDescriptor, CodecSupport)>>>,
+    registry: Arc<Mutex<SessionRegistry>>,
     counter: Arc<AtomicU64>,
+    cleanup_started: Arc<std::sync::atomic::AtomicBool>,
     config: SabrEngineConfig,
-    idle_ttl: Duration,
-    max_active: usize,
-    max_prepared: usize,
 }
 
 impl Default for SabrSessionManager {
@@ -167,132 +151,178 @@ impl Default for SabrSessionManager {
 impl SabrSessionManager {
     pub fn new() -> Self {
         Self {
-            sessions: Arc::new(Mutex::new(HashMap::new())),
-            prepared: Arc::new(Mutex::new(HashMap::new())),
+            registry: Arc::new(Mutex::new(SessionRegistry::default())),
             counter: Arc::new(AtomicU64::new(1)),
+            cleanup_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             config: SabrEngineConfig::default(),
-            idle_ttl: Duration::from_secs(10 * 60),
-            max_active: 4,
-            max_prepared: 32,
         }
     }
 
-    // Register a descriptor for lazy activation. Returns the session id to embed
-    // in the manifest URL. No engine is started yet.
-    pub fn prepare(&self, descriptor: SabrSessionDescriptor, support: CodecSupport) -> String {
-        // Reuse an existing session for the same video. The frontend may resolve a
-        // stream more than once (re-mount / double-fetch); two concurrent SABR
-        // sessions for one video share a pot/visitor and trip YouTube's attestation.
-        {
-            let prepared = self.prepared.lock().unwrap();
-            if let Some((id, _)) = prepared
-                .iter()
-                .find(|(_, (d, _))| d.video_id == descriptor.video_id)
-            {
-                return id.clone();
+    fn prune(registry: &mut SessionRegistry) {
+        registry.leases.retain(|_, consumers| {
+            consumers.retain(|_, touched| touched.elapsed() < Duration::from_secs(180));
+            !consumers.is_empty()
+        });
+        registry.sessions.retain(|id, handle| {
+            if registry.leases.contains_key(id) {
+                true
+            } else {
+                handle.engine.cancel();
+                false
             }
-        }
-        {
-            let sessions = self.sessions.lock().unwrap();
-            if let Some(handle) = sessions
-                .values()
-                .find(|h| h.video_id == descriptor.video_id)
-            {
-                return handle.session_id.clone();
-            }
-        }
+        });
+        registry.prepared.retain(|id, prepared| {
+            registry.leases.contains_key(id)
+                || prepared.prepared_at.elapsed() < Duration::from_secs(3600)
+        });
+    }
 
-        let id = format!("s{}", self.counter.fetch_add(1, Ordering::Relaxed));
-        let mut prepared = self.prepared.lock().unwrap();
-        if prepared.len() >= self.max_prepared {
-            // Drop an arbitrary stale prepared descriptor (bounded memory).
-            if let Some(k) = prepared.keys().next().cloned() {
-                prepared.remove(&k);
+    fn start_cleanup(&self) {
+        if self.cleanup_started.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let registry = Arc::downgrade(&self.registry);
+        tokio::spawn(async move {
+            let mut timer = tokio::time::interval(Duration::from_secs(30));
+            timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                timer.tick().await;
+                let Some(registry) = registry.upgrade() else {
+                    break;
+                };
+                Self::prune(&mut registry.lock().unwrap());
+            }
+        });
+    }
+
+    pub fn prepare(&self, descriptor: SabrSessionDescriptor, support: CodecSupport) -> String {
+        let mut registry = self.registry.lock().unwrap();
+        Self::prune(&mut registry);
+        let existing = registry
+            .prepared
+            .iter()
+            .find(|(_, prepared)| prepared.descriptor.video_id == descriptor.video_id)
+            .map(|(id, _)| id.clone());
+        let id = existing
+            .unwrap_or_else(|| format!("s{}", self.counter.fetch_add(1, Ordering::Relaxed)));
+        if registry.prepared.len() >= 32 {
+            let oldest = registry
+                .prepared
+                .iter()
+                .filter(|(candidate, _)| {
+                    *candidate != &id && !registry.leases.contains_key(*candidate)
+                })
+                .min_by_key(|(_, prepared)| prepared.prepared_at)
+                .map(|(key, _)| key.clone());
+            if let Some(oldest) = oldest {
+                registry.prepared.remove(&oldest);
             }
         }
-        prepared.insert(id.clone(), (descriptor, support));
+        registry.prepared.insert(
+            id.clone(),
+            PreparedSession {
+                descriptor,
+                support,
+                prepared_at: Instant::now(),
+            },
+        );
         id
     }
 
-    // Get a live session, or lazily create + spawn its engine from a prepared
-    // descriptor on first access.
-    pub fn activate(&self, session_id: &str) -> SabrResult<Arc<SabrSessionHandle>> {
-        self.prune_expired();
+    pub fn acquire(&self, session_id: &str, lease_id: &str) -> SabrResult<()> {
+        let mut registry = self.registry.lock().unwrap();
+        Self::prune(&mut registry);
+        self.activate_locked(&mut registry, session_id)?;
+        registry
+            .leases
+            .entry(session_id.to_string())
+            .or_default()
+            .insert(lease_id.to_string(), Instant::now());
+        drop(registry);
+        self.start_cleanup();
+        Ok(())
+    }
 
-        if let Some(handle) = self.get(session_id) {
-            return Ok(handle);
+    fn activate_locked(
+        &self,
+        registry: &mut SessionRegistry,
+        session_id: &str,
+    ) -> SabrResult<Arc<SabrSessionHandle>> {
+        let prepared = registry
+            .prepared
+            .get(session_id)
+            .ok_or(SabrError::Cancelled)?;
+        if let Some(handle) = registry.sessions.get(session_id) {
+            if !handle.engine.is_finished() || prepared.prepared_at <= handle.prepared_at {
+                return Ok(handle.clone());
+            }
         }
-
-        let (descriptor, support) = {
-            let prepared = self.prepared.lock().unwrap();
-            prepared.get(session_id).cloned()
-        }
-        .ok_or(SabrError::Cancelled)?;
-
-        let selected = selector::select_formats(&descriptor.formats, Some(480), support)
+        let descriptor = prepared.descriptor.clone();
+        let selected = selector::select_formats(&descriptor.formats, Some(480), prepared.support)
             .ok_or(SabrError::NoPlayableFormats)?;
-
         let engine = Arc::new(SabrEngine::new(
             session_id.to_string(),
             descriptor.clone(),
             selected,
             self.config.clone(),
         ));
-        engine.clone().spawn();
-
         let handle = Arc::new(SabrSessionHandle {
             session_id: session_id.to_string(),
-            video_id: descriptor.video_id.clone(),
-            engine,
-            created_at: Instant::now(),
-            last_access: Mutex::new(Instant::now()),
-            expires_in_seconds: 3600,
+            video_id: descriptor.video_id,
+            engine: engine.clone(),
+            prepared_at: prepared.prepared_at,
         });
-
-        let mut sessions = self.sessions.lock().unwrap();
-        if sessions.len() >= self.max_active {
-            if let Some(oldest) = sessions
-                .values()
-                .min_by_key(|h| *h.last_access.lock().unwrap())
-                .map(|h| h.session_id.clone())
-            {
-                if let Some(removed) = sessions.remove(&oldest) {
-                    removed.engine.cancel();
-                }
-            }
+        if let Some(previous) = registry
+            .sessions
+            .insert(session_id.to_string(), handle.clone())
+        {
+            previous.engine.cancel();
         }
-        sessions.insert(session_id.to_string(), handle.clone());
+        engine.spawn();
         Ok(handle)
     }
 
-    pub fn get(&self, session_id: &str) -> Option<Arc<SabrSessionHandle>> {
-        let sessions = self.sessions.lock().unwrap();
-        let handle = sessions.get(session_id).cloned();
-        if let Some(h) = &handle {
-            h.touch();
-        }
-        handle
+    pub fn touch(&self, session_id: &str, lease_id: &str) -> bool {
+        let mut registry = self.registry.lock().unwrap();
+        let Some(touched) = registry
+            .leases
+            .get_mut(session_id)
+            .and_then(|leases| leases.get_mut(lease_id))
+        else {
+            return false;
+        };
+        *touched = Instant::now();
+        true
     }
 
-    pub fn remove(&self, session_id: &str) {
-        if let Some(removed) = self.sessions.lock().unwrap().remove(session_id) {
-            removed.engine.cancel();
-        }
-        self.prepared.lock().unwrap().remove(session_id);
-    }
-
-    fn prune_expired(&self) {
-        let mut sessions = self.sessions.lock().unwrap();
-        let idle_ttl = self.idle_ttl;
-        let expired: Vec<String> = sessions
-            .iter()
-            .filter(|(_, h)| h.is_expired(idle_ttl))
-            .map(|(k, _)| k.clone())
-            .collect();
-        for key in expired {
-            if let Some(removed) = sessions.remove(&key) {
-                removed.engine.cancel();
+    pub fn release(&self, session_id: &str, lease_id: &str) {
+        let mut registry = self.registry.lock().unwrap();
+        if let Some(leases) = registry.leases.get_mut(session_id) {
+            leases.remove(lease_id);
+            if !leases.is_empty() {
+                return;
             }
         }
+        registry.leases.remove(session_id);
+        if let Some(handle) = registry.sessions.remove(session_id) {
+            handle.engine.cancel();
+        }
+    }
+
+    pub fn activate(&self, session_id: &str) -> SabrResult<Arc<SabrSessionHandle>> {
+        let mut registry = self.registry.lock().unwrap();
+        if !registry.leases.contains_key(session_id) {
+            return Err(SabrError::Cancelled);
+        }
+        self.activate_locked(&mut registry, session_id)
+    }
+
+    pub fn get(&self, session_id: &str) -> Option<Arc<SabrSessionHandle>> {
+        self.registry
+            .lock()
+            .unwrap()
+            .sessions
+            .get(session_id)
+            .cloned()
     }
 }
