@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getLiveChat } from "./api/youtube";
+import { useVisibleWork } from "./useVisibleWork";
 import type { LiveChatMessage } from "../types/video";
 
 const MAX_MESSAGES = 200;
@@ -18,6 +19,19 @@ export interface LiveChatState {
   reconnect: () => void;
 }
 
+interface ChatSession {
+  videoId: string;
+  reconnectNonce: number;
+  continuation: string | null;
+  seen: Set<string>;
+  failures: number;
+  reseeds: number;
+  delay: number;
+  nextPollAt: number;
+  ended: boolean;
+  pending: Promise<void> | null;
+}
+
 /**
  * Polls YouTube's native live chat for `videoId` while `enabled`. Seeds the continuation token
  * on the first call, then walks the continuation chain at the server-recommended cadence,
@@ -32,94 +46,112 @@ export function useLiveChat(videoId: string | undefined, enabled: boolean): Live
   const [loading, setLoading] = useState(false);
   const [ended, setEnded] = useState(false);
   const [reconnectNonce, setReconnectNonce] = useState(0);
-
-  const seenRef = useRef<Set<string>>(new Set());
-  const backlogKeyRef = useRef<string | null>(null);
-
+  const visible = useVisibleWork();
+  const sessionRef = useRef<ChatSession | null>(null);
   const reconnect = useCallback(() => setReconnectNonce((value) => value + 1), []);
 
   useEffect(() => {
-    // A reconnect resumes the same conversation, so only a different video clears the backlog.
-    if (backlogKeyRef.current !== videoId) {
-      backlogKeyRef.current = videoId ?? null;
-      seenRef.current = new Set();
+    if (!videoId) {
+      sessionRef.current = null;
       setMessages([]);
+      setLoading(false);
+      setEnded(false);
+      return;
     }
-    setEnded(false);
 
-    if (!videoId || !enabled) {
+    const previous = sessionRef.current;
+    if (previous?.videoId !== videoId || previous.reconnectNonce !== reconnectNonce) {
+      const sameVideo = previous?.videoId === videoId;
+      sessionRef.current = {
+        videoId,
+        reconnectNonce,
+        continuation: null,
+        seen: sameVideo ? previous.seen : new Set(),
+        failures: 0,
+        reseeds: 0,
+        delay: RETRY_MS,
+        nextPollAt: 0,
+        ended: false,
+        pending: null,
+      };
+      if (!sameVideo) setMessages([]);
+      setEnded(false);
+    }
+    const session = sessionRef.current!;
+    if (!enabled || !visible || session.ended) {
       setLoading(false);
       return;
     }
 
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
-    let continuation: string | null = null;
-    let failures = 0;
-    let reseeds = 0;
     setLoading(true);
 
-    const schedule = (delay: number) => {
-      if (cancelled) return;
-      timer = setTimeout(() => void poll(), delay);
-    };
-
-    const poll = async () => {
-      if (cancelled) return;
+    const fetchPage = async () => {
       try {
-        const page = await getLiveChat(videoId, continuation);
-        if (cancelled) return;
+        const page = await getLiveChat(videoId, session.continuation);
+        if (sessionRef.current !== session) return;
         setLoading(false);
-
-        const fresh = page.messages.filter((m) => !seenRef.current.has(m.id));
+        const fresh = page.messages.filter((message) => !session.seen.has(message.id));
         if (fresh.length > 0) {
-          for (const m of fresh) seenRef.current.add(m.id);
-          if (seenRef.current.size > MAX_SEEN_IDS) {
-            seenRef.current = new Set(Array.from(seenRef.current).slice(-MAX_SEEN_IDS));
+          for (const message of fresh) session.seen.add(message.id);
+          if (session.seen.size > MAX_SEEN_IDS) {
+            session.seen = new Set(Array.from(session.seen).slice(-MAX_SEEN_IDS));
           }
-          setMessages((prev) => {
-            const next = [...prev, ...fresh];
-            return next.length > MAX_MESSAGES ? next.slice(next.length - MAX_MESSAGES) : next;
-          });
+          setMessages((previousMessages) => [...previousMessages, ...fresh].slice(-MAX_MESSAGES));
         }
-
+        session.continuation = page.continuation ?? null;
         if (!page.continuation) {
-          if (reseeds >= MAX_RESEEDS) {
+          if (session.reseeds >= MAX_RESEEDS) {
+            session.ended = true;
             setEnded(true);
             return;
           }
-          reseeds += 1;
-          continuation = null;
-          schedule(RETRY_MS);
+          session.reseeds += 1;
+          session.delay = RETRY_MS;
           return;
         }
-
-        failures = 0;
-        reseeds = 0;
-        continuation = page.continuation;
-        schedule(Math.max(MIN_POLL_MS, page.pollingIntervalMs || 2000));
-      } catch (err) {
-        if (cancelled) return;
-        failures += 1;
-        console.warn("Live chat poll failed", err);
-        if (failures >= MAX_FAILURES) {
+        session.failures = 0;
+        session.reseeds = 0;
+        session.delay = Math.max(MIN_POLL_MS, page.pollingIntervalMs || 2000);
+      } catch (error) {
+        if (sessionRef.current !== session) return;
+        session.failures += 1;
+        session.continuation = null;
+        console.warn("Live chat poll failed", error);
+        if (session.failures >= MAX_FAILURES) {
+          session.ended = true;
           setLoading(false);
           setEnded(true);
           return;
         }
-        // Backing off matters more than reconnecting fast: YouTube throttles a
-        // chat that keeps hammering it, and a fixed retry never lets that clear.
-        schedule(Math.min(MAX_RETRY_MS, RETRY_MS * 2 ** (failures - 1)));
+        session.delay = Math.min(MAX_RETRY_MS, RETRY_MS * 2 ** (session.failures - 1));
+      } finally {
+        session.nextPollAt = Date.now() + session.delay;
+        session.pending = null;
       }
     };
 
+    const poll = async () => {
+      if (cancelled) return;
+      if (!session.pending && session.nextPollAt > Date.now()) {
+        setLoading(false);
+        timer = setTimeout(() => void poll(), session.nextPollAt - Date.now());
+        return;
+      }
+      session.pending ??= fetchPage();
+      await session.pending;
+      if (cancelled || sessionRef.current !== session || session.ended) return;
+      setLoading(false);
+      timer = setTimeout(() => void poll(), Math.max(0, session.nextPollAt - Date.now()));
+    };
     void poll();
 
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [videoId, enabled, reconnectNonce]);
+  }, [videoId, enabled, visible, reconnectNonce]);
 
   return { messages, loading, ended, reconnect };
 }
