@@ -14,6 +14,7 @@ import type {
   PlaylistSummary,
 } from "../../types/video";
 import { isTauriEnv } from "./env";
+import { requestChannelDetails, type ChannelDetailsOptions } from "../channelDetailsCache";
 import {
   BackendApiError,
   getBackendErrorMessage,
@@ -197,7 +198,11 @@ export async function getSabrDebugState(
   return invokeBackend<SabrDebugState | null>("get_sabr_debug_state", { sessionId });
 }
 
-export async function getChannelDetails(channelId: string): Promise<ChannelDetails> {
+export function getChannelDetails(channelId: string, options?: ChannelDetailsOptions): Promise<ChannelDetails> {
+  return requestChannelDetails(channelId, () => loadChannelDetails(channelId), options);
+}
+
+async function loadChannelDetails(channelId: string): Promise<ChannelDetails> {
   if (!(await isTauriEnv())) {
     console.warn("Tauri not detected. Returning mock channel details.");
     return {

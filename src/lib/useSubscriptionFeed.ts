@@ -10,6 +10,8 @@ import { getSetting, setSetting } from './api/db';
 import type { SubscribedChannel } from '../store/useSubscriptionStore';
 import type { ChannelDetails, VideoSummary } from '../types/video';
 import { mapWithConcurrency } from './concurrency';
+import { getCachedChannelDetails } from './channelDetailsCache';
+import { useVisibleWork } from './useVisibleWork';
 
 export interface ScanProgress {
   processed: number;
@@ -183,67 +185,48 @@ export function useSubscriptionFeed(channels: SubscribedChannel[]) {
   return { videos, rssChannels, loading, error, scanProgress };
 }
 
-const channelDetailsCache = new Map<string, ChannelDetails>();
-
 function needsDetails(channel: SubscribedChannel): boolean {
   return !channel.avatarUrl || !channel.subscriberCountText;
 }
 
 export function useSubscriptionChannelDetails(channels: SubscribedChannel[]) {
   const [detailsById, setDetailsById] = useState<Record<string, ChannelDetails>>({});
-
-  const idsToFetch = useMemo(
-    () =>
-      channels
-        .filter((channel) => needsDetails(channel) && !channelDetailsCache.has(channel.id))
-        .map((channel) => channel.id),
+  const visible = useVisibleWork();
+  const fetchKey = useMemo(
+    () => [...new Set(channels.filter(needsDetails).map((channel) => channel.id))].sort().join('|'),
     [channels],
   );
-  const fetchKey = useMemo(() => [...idsToFetch].sort().join('|'), [idsToFetch]);
 
   useEffect(() => {
-    if (channelDetailsCache.size > 0) {
-      setDetailsById((prev) => {
-        const next = { ...prev };
-        for (const [id, details] of channelDetailsCache) next[id] = details;
-        return next;
-      });
-    }
-
+    if (!visible) return;
     const ids = fetchKey.split('|').filter(Boolean);
     if (ids.length === 0) return;
+    const controller = new AbortController();
+    const cached: Record<string, ChannelDetails> = {};
+    for (const id of ids) {
+      const details = getCachedChannelDetails(id);
+      if (details) cached[id] = details;
+    }
+    setDetailsById(cached);
 
-    let active = true;
+    void mapWithConcurrency(ids.filter((id) => !cached[id]), 4, async (channelId) => {
+      if (controller.signal.aborted) return null;
+      try {
+        const details = await getChannelDetails(channelId, { signal: controller.signal, background: true });
+        return [channelId, details] as const;
+      } catch (error) {
+        if (!controller.signal.aborted) console.warn('Failed to load subscription channel details', channelId, error);
+        return null;
+      }
+    }).then((entries) => {
+      if (controller.signal.aborted) return;
+      const next = { ...cached };
+      for (const entry of entries) if (entry) next[entry[0]] = entry[1];
+      setDetailsById(next);
+    });
 
-    const loadDetails = async () => {
-      const entries = await mapWithConcurrency(ids, 6, async (channelId) => {
-        try {
-          const details = await getChannelDetails(channelId);
-          channelDetailsCache.set(channelId, details);
-          return [channelId, details] as const;
-        } catch (err) {
-          console.warn('Failed to load subscription channel details', channelId, err);
-          return null;
-        }
-      });
-
-      if (!active) return;
-
-      setDetailsById((prev) => {
-        const next = { ...prev };
-        for (const entry of entries) {
-          if (entry) next[entry[0]] = entry[1];
-        }
-        return next;
-      });
-    };
-
-    loadDetails();
-
-    return () => {
-      active = false;
-    };
-  }, [fetchKey]);
+    return () => controller.abort();
+  }, [fetchKey, visible]);
 
   return detailsById;
 }

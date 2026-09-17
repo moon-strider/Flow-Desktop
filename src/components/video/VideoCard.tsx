@@ -16,6 +16,7 @@ import { getVideoDetails } from '../../lib/api/youtube';
 import { useSettingsStore } from '../../store/useSettingsStore';
 import { useAppSettingsStore } from '../../store/useAppSettingsStore';
 import { useChannelAvatar } from '../../lib/useChannelAvatar';
+import { useNearViewport } from '../../lib/useVisibleWork';
 import { isUnavailableYoutubeThumbnail, resolveYoutubeThumbnailCandidates, upgradeAvatarUrl } from '../../lib/thumbnails';
 import { IS_LINUX_RUNTIME } from '../../lib/platform';
 import { useProxiedImageUrl } from '../../lib/useProxiedImageUrl';
@@ -153,8 +154,13 @@ function VideoCardComponent({
   // Only resolve via the hook when the feed didn't already supply an avatar —
   // the hook falls back to a getChannelDetails() network fetch per unknown
   // channel, which multiplied across a large feed floods the backend.
+  const nearViewport = useNearViewport(
+    cardRef,
+    !isChannel && variant !== 'compact' && variant !== 'list' && !hideChannelAvatar && !video.channelAvatarUrl,
+  );
   const hookAvatarUrl = useChannelAvatar(
     isChannel || video.channelAvatarUrl ? null : channelId || null,
+    nearViewport,
   );
   const resolvedAvatarUrl = useProxiedImageUrl(upgradeAvatarUrl(video.channelAvatarUrl || hookAvatarUrl));
   const channelCardAvatarUrl = useProxiedImageUrl(isChannel ? upgradeAvatarUrl(video.thumbnailUrl) : null);
