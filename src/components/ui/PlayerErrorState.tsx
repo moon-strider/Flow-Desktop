@@ -27,6 +27,7 @@ export function PlayerErrorState({
 }: PlayerErrorStateProps) {
   const [copied, setCopied] = useState(false);
 
+  const showWarning = error.kind !== "liveStreamOffline";
   const showRetry = error.retryable && Boolean(onRetry);
   const showOpen = error.canOpenInBrowser && Boolean(onOpenInBrowser);
   const showCopy = Boolean(onCopyLogs);
@@ -75,9 +76,11 @@ export function PlayerErrorState({
       <div
         className={`flex items-center gap-3 rounded-2xl border border-chrome-neutral-800 bg-surface-container-high px-4 py-3 ${className}`}
       >
-        <div className="grid h-9 w-9 shrink-0 place-items-center rounded-full border border-chrome-red-900/50 bg-chrome-red-950/30 text-chrome-red-400">
-          <AlertTriangle className="h-[18px] w-[18px]" />
-        </div>
+        {showWarning && (
+          <div className="grid h-9 w-9 shrink-0 place-items-center rounded-full border border-chrome-red-900/50 bg-chrome-red-950/30 text-chrome-red-400">
+            <AlertTriangle className="h-[18px] w-[18px]" />
+          </div>
+        )}
         <div className="min-w-0 flex-1">
           <div className="truncate text-sm font-semibold text-chrome-neutral-100">{error.title}</div>
           <div className="truncate text-xs text-chrome-neutral-400">{error.hint}</div>
@@ -89,9 +92,11 @@ export function PlayerErrorState({
 
   return (
     <div className={`w-full max-w-md text-center ${className}`}>
-      <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full border border-chrome-red-900/50 bg-chrome-red-950/30 text-chrome-red-400">
-        <AlertTriangle className="h-7 w-7" />
-      </div>
+      {showWarning && (
+        <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full border border-chrome-red-900/50 bg-chrome-red-950/30 text-chrome-red-400">
+          <AlertTriangle className="h-7 w-7" />
+        </div>
+      )}
       <h2 className="text-lg font-bold tracking-tight text-chrome-neutral-100">{error.title}</h2>
       <p className="mx-auto mt-2 max-w-sm text-sm leading-relaxed text-chrome-neutral-400">
         {error.hint}
