@@ -1,6 +1,6 @@
 use futures_util::StreamExt;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -39,6 +39,7 @@ struct CachedResponse {
 pub struct StreamingManager {
     sessions: Arc<Mutex<HashMap<String, StreamSession>>>,
     response_cache: Arc<Mutex<HashMap<String, Arc<CachedResponse>>>>,
+    image_fetches: Arc<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>>,
     port: u16,
     sabr: SabrSessionManager,
 }
@@ -46,6 +47,7 @@ pub struct StreamingManager {
 const MAX_CACHED_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_TOTAL_CACHE_BYTES: usize = 192 * 1024 * 1024;
 const CACHE_TTL_SECONDS: u64 = 30 * 60;
+pub const REMOTE_SESSION_TTL_SECONDS: u64 = 3600;
 const MAX_UPSTREAM_RECOVERIES: u32 = 6;
 const MAX_HEADER_BYTES: usize = 32 * 1024;
 const LOCAL_FILE_CHUNK_BYTES: usize = 256 * 1024;
@@ -96,6 +98,7 @@ impl StreamingManager {
         let manager = Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             response_cache: Arc::new(Mutex::new(HashMap::new())),
+            image_fetches: Arc::new(Mutex::new(HashMap::new())),
             port,
             sabr: SabrSessionManager::new(),
         };
@@ -135,7 +138,7 @@ impl StreamingManager {
         let session = StreamSession {
             kind: StreamSessionKind::Remote { remote_url },
             content_type,
-            expires_at: now + 3600,
+            expires_at: now + REMOTE_SESSION_TTL_SECONDS,
             user_agent,
         };
         let mut lock = self.sessions.lock().unwrap();
@@ -189,6 +192,17 @@ impl StreamingManager {
             lock.remove(token);
         }
         None
+    }
+
+    fn image_fetch_lock(&self, key: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut fetches = self.image_fetches.lock().unwrap();
+        fetches.retain(|_, pending| pending.strong_count() > 0);
+        if let Some(lock) = fetches.get(key).and_then(Weak::upgrade) {
+            return lock;
+        }
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        fetches.insert(key.to_string(), Arc::downgrade(&lock));
+        lock
     }
 
     fn get_cached_response(&self, key: &str) -> Option<Arc<CachedResponse>> {
@@ -813,7 +827,7 @@ async fn relay_remote(
     session: &StreamSession,
     target_url: &str,
     client_range: Option<&str>,
-    path: &str,
+    _path: &str,
     head_only: bool,
 ) -> std::io::Result<()> {
     let range = if head_only {
@@ -827,9 +841,19 @@ async fn relay_remote(
     let range_key = range.map_or_else(|| "full".to_string(), ByteRange::header_value);
     let cache_key = format!("{target_url}|{range_key}");
 
-    if let Some(cached) = manager.get_cached_response(&cache_key) {
+    let is_image = session.content_type.starts_with("image/");
+    if is_image && let Some(cached) = manager.get_cached_response(&cache_key) {
         return write_cached_response(socket, &cached, head_only).await;
     }
+    let _image_fetch = if is_image && !head_only {
+        let lock = manager.image_fetch_lock(&cache_key).lock_owned().await;
+        if let Some(cached) = manager.get_cached_response(&cache_key) {
+            return write_cached_response(socket, &cached, head_only).await;
+        }
+        Some(lock)
+    } else {
+        None
+    };
 
     let mut headers_written = false;
     let mut bytes_relayed: u64 = 0;
@@ -865,7 +889,6 @@ async fn relay_remote(
             |resume| Some(format!("bytes={}-{}", resume.start, resume.end)),
         );
 
-        let is_image = session.content_type.starts_with("image/");
         let mut req = if head_only {
             client.head(target_url)
         } else {
@@ -994,13 +1017,13 @@ async fn relay_remote(
             }
             let is_cacheable_kind = ct_lower.starts_with("image/");
 
-            let should_cache = status.is_success()
+            let should_cache = is_image
+                && status.is_success()
                 && !is_manifest
                 && is_cacheable_kind
                 && content_length_header.is_some()
                 && content_length_value > 0
-                && content_length_value <= MAX_CACHED_RESPONSE_BYTES
-                && (range.is_some() || path.starts_with("/proxy/"));
+                && content_length_value <= MAX_CACHED_RESPONSE_BYTES;
 
             let mut response_headers = format!(
                 "HTTP/1.1 {} {}\r\nContent-Type: {}\r\n",
@@ -1016,7 +1039,7 @@ async fn relay_remote(
             }
             response_headers.push_str(&format!("Accept-Ranges: {accept_ranges_value}\r\n"));
             response_headers.push_str(CORS_HEADERS);
-            if is_manifest {
+            if is_manifest || !status.is_success() {
                 response_headers.push_str("Cache-Control: no-cache, no-store, must-revalidate\r\n");
             } else {
                 response_headers.push_str("Cache-Control: private, max-age=1800\r\n");

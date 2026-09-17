@@ -377,11 +377,18 @@ fn proxyable_image_url(parsed: &reqwest::Url) -> String {
     }
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageProxyUrl {
+    url: String,
+    expires_at: u64,
+}
+
 #[tauri::command]
 pub async fn proxy_image_url(
     url: String,
     streaming_manager: State<'_, StreamingManager>,
-) -> CmdResult<String> {
+) -> CmdResult<ImageProxyUrl> {
     let trimmed = url.trim();
     let parsed = reqwest::Url::parse(trimmed)
         .map_err(|_| ErrorResponse::from(AppError::Validation("Invalid image URL".into())))?;
@@ -414,9 +421,16 @@ pub async fn proxy_image_url(
         crate::api::http::BROWSER_USER_AGENT.to_string(),
     );
 
-    Ok(format!(
-        "http://127.0.0.1:{}/stream/{}",
-        streaming_manager.get_port(),
-        token
-    ))
+    Ok(ImageProxyUrl {
+        url: format!(
+            "http://127.0.0.1:{}/stream/{}",
+            streaming_manager.get_port(),
+            token
+        ),
+        expires_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            + crate::streaming::proxy::REMOTE_SESSION_TTL_SECONDS,
+    })
 }
