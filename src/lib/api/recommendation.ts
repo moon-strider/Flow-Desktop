@@ -2,6 +2,7 @@ import type { VideoSummary } from "../../types/video";
 import { isDeepFlowCurrentlyActive } from "../deepFlow";
 import { isTauriEnv } from "./env";
 import { invokeBackend } from "./errors";
+import { invalidateHomeFeedCache } from "../homeFeedCoordinator";
 
 export interface PersonaDetails {
   name: string;
@@ -83,9 +84,10 @@ export async function logInteraction(
 
   if (!(await isTauriEnv())) {
     console.log(`[FlowNeuro Mock Log] ${interactionType} - ${title} (${percentWatched * 100}%)`);
+    if (interactionType === "LIKED" || interactionType === "DISLIKED") invalidateHomeFeedCache();
     return;
   }
-  return invokeBackend<void>("log_interaction", {
+  await invokeBackend<void>("log_interaction", {
     videoId,
     title,
     channelName,
@@ -97,6 +99,7 @@ export async function logInteraction(
     interactionType,
     percentWatched,
   });
+  if (interactionType === "LIKED" || interactionType === "DISLIKED") invalidateHomeFeedCache();
 }
 
 export async function markNotInterested(
@@ -113,9 +116,10 @@ export async function markNotInterested(
 
   if (!(await isTauriEnv())) {
     console.log(`[FlowNeuro Mock] Not interested - ${title}`);
+    invalidateHomeFeedCache();
     return;
   }
-  return invokeBackend<void>("mark_not_interested", {
+  await invokeBackend<void>("mark_not_interested", {
     videoId,
     title,
     channelName,
@@ -125,6 +129,7 @@ export async function markNotInterested(
     isLive,
     isShort,
   });
+  invalidateHomeFeedCache();
 }
 
 export async function recordFeedImpressions(
@@ -143,9 +148,11 @@ export async function completeOnboarding(preferred: string[]): Promise<void> {
     console.warn("Tauri not detected. Setting onboarding complete in local storage.");
     localStorage.setItem("mock_setting_onboarded", "true");
     localStorage.setItem("mock_setting_preferred_topics", JSON.stringify(preferred));
+    invalidateHomeFeedCache();
     return;
   }
-  return invokeBackend<void>("complete_onboarding", { topics: preferred });
+  await invokeBackend<void>("complete_onboarding", { topics: preferred });
+  invalidateHomeFeedCache();
 }
 
 export async function getOnboardingStatus(): Promise<boolean> {
@@ -413,10 +420,12 @@ export async function unblockTopic(topic: string): Promise<void> {
     if (brainCache) {
       brainCache.blocked_topics = brainCache.blocked_topics.filter(t => t !== topic);
     }
+    invalidateHomeFeedCache();
     return;
   }
   await invokeBackend<void>("unblock_topic", { topic });
   brainCache = null;
+  invalidateHomeFeedCache();
 }
 
 export async function addBlockedTopic(topic: string): Promise<void> {
@@ -430,10 +439,12 @@ export async function addBlockedTopic(topic: string): Promise<void> {
         (t) => t.toLowerCase() !== normalized,
       );
     }
+    invalidateHomeFeedCache();
     return;
   }
   await invokeBackend<void>("add_blocked_topic", { topic: normalized });
   brainCache = null;
+  invalidateHomeFeedCache();
 }
 
 export async function addPreferredTopic(topic: string): Promise<void> {
@@ -452,10 +463,12 @@ export async function addPreferredTopic(topic: string): Promise<void> {
       "mock_setting_preferred_topics",
       JSON.stringify(brainCache?.preferred_topics ?? [trimmed]),
     );
+    invalidateHomeFeedCache();
     return;
   }
   await invokeBackend<void>("add_preferred_topic", { topic: trimmed });
   brainCache = null;
+  invalidateHomeFeedCache();
 }
 
 export async function removePreferredTopic(topic: string): Promise<void> {
@@ -469,10 +482,12 @@ export async function removePreferredTopic(topic: string): Promise<void> {
       );
       localStorage.setItem("mock_setting_preferred_topics", JSON.stringify(brainCache.preferred_topics));
     }
+    invalidateHomeFeedCache();
     return;
   }
   await invokeBackend<void>("remove_preferred_topic", { topic });
   brainCache = null;
+  invalidateHomeFeedCache();
 }
 
 export async function unblockChannel(channelId: string): Promise<void> {
@@ -481,19 +496,23 @@ export async function unblockChannel(channelId: string): Promise<void> {
     if (brainCache) {
       brainCache.blocked_channels = brainCache.blocked_channels.filter(c => c !== channelId);
     }
+    invalidateHomeFeedCache();
     return;
   }
   await invokeBackend<void>("unblock_channel", { channelId });
   brainCache = null;
+  invalidateHomeFeedCache();
 }
 
 export async function blockChannel(channelId: string): Promise<void> {
   if (!(await isTauriEnv())) {
     console.log(`[FlowNeuro Mock] Blocking channel: ${channelId}`);
+    invalidateHomeFeedCache();
     return;
   }
   await invokeBackend<void>("block_channel", { channelId });
   brainCache = null;
+  invalidateHomeFeedCache();
 }
 
 export async function resetBrain(): Promise<void> {
@@ -502,8 +521,10 @@ export async function resetBrain(): Promise<void> {
     localStorage.removeItem("mock_setting_onboarded");
     localStorage.removeItem("mock_setting_preferred_topics");
     brainCache = null;
+    invalidateHomeFeedCache();
     return;
   }
   await invokeBackend<void>("reset_brain");
   brainCache = null;
+  invalidateHomeFeedCache();
 }

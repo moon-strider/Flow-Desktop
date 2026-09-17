@@ -1295,6 +1295,95 @@ fn dedupe_channel_ids(channel_ids: Vec<String>) -> Result<Vec<String>, ErrorResp
 const SUBSCRIPTION_RSS_BATCH_SIZE: usize = 50;
 
 const SUBSCRIPTION_RSS_CONCURRENCY: usize = 16;
+type RssChannelResult = (SubscriptionRssChannel, Vec<(i64, VideoSummary)>);
+type RssChannelCache = std::sync::Arc<tokio::sync::Mutex<Option<CachedRssChannel>>>;
+
+struct CachedRssChannel {
+    fetched_at: std::time::Instant,
+    result: Result<RssChannelResult, String>,
+}
+
+async fn fetch_rss_channel(
+    client: &'static reqwest::Client,
+    channel_id: String,
+) -> Result<RssChannelResult, crate::errors::AppError> {
+    const CACHE_LIMIT: usize = 1024;
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, RssChannelCache)>>,
+    > = std::sync::OnceLock::new();
+    static REQUESTS: tokio::sync::Semaphore =
+        tokio::sync::Semaphore::const_new(SUBSCRIPTION_RSS_CONCURRENCY);
+
+    let cell = {
+        let mut entries = CACHE
+            .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while entries.len() >= CACHE_LIMIT && !entries.contains_key(&channel_id) {
+            let oldest = entries
+                .iter()
+                .filter(|(_, (_, cell))| std::sync::Arc::strong_count(cell) == 1)
+                .min_by_key(|(_, (accessed_at, _))| *accessed_at)
+                .map(|(id, _)| id.clone());
+            let Some(oldest) = oldest else { break };
+            entries.remove(&oldest);
+        }
+        let (accessed_at, cell) = entries.entry(channel_id.clone()).or_insert_with(|| {
+            (
+                std::time::Instant::now(),
+                std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            )
+        });
+        *accessed_at = std::time::Instant::now();
+        std::sync::Arc::clone(cell)
+    };
+    let mut cached = cell.lock().await;
+    if let Some(entry) = cached.as_ref() {
+        let ttl = if entry.result.is_ok() { 15 * 60 } else { 5 };
+        if entry.fetched_at.elapsed() < std::time::Duration::from_secs(ttl) {
+            return entry
+                .result
+                .clone()
+                .map_err(crate::errors::AppError::Extractor);
+        }
+    }
+
+    let result = async {
+        let _permit = REQUESTS
+            .acquire()
+            .await
+            .map_err(|error| error.to_string())?;
+        let rss_url = format!("https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}");
+        let xml = client
+            .get(rss_url)
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status)
+            .map_err(|error| format!("RSS fetch failed for {channel_id}: {error}"))?
+            .text()
+            .await
+            .map_err(|error| format!("RSS read failed for {channel_id}: {error}"))?;
+        if !xml.contains("<feed") || !xml.contains("</feed>") {
+            return Err(format!("Invalid RSS response for {channel_id}"));
+        }
+        let (name, videos) = parse_rss_feed(&channel_id, &xml);
+        Ok((
+            SubscriptionRssChannel {
+                id: channel_id,
+                name,
+                avatar_url: None,
+            },
+            videos,
+        ))
+    }
+    .await;
+    *cached = Some(CachedRssChannel {
+        fetched_at: std::time::Instant::now(),
+        result: result.clone(),
+    });
+    result.map_err(crate::errors::AppError::Extractor)
+}
+
 async fn fetch_rss_channel_batch(
     client: &'static reqwest::Client,
     channel_ids: &[String],
@@ -1302,37 +1391,7 @@ async fn fetch_rss_channel_batch(
     let results = crate::api::http::bounded_join(
         channel_ids.iter().cloned(),
         SUBSCRIPTION_RSS_CONCURRENCY,
-        move |channel_id| async move {
-            let rss_url =
-                format!("https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}");
-            let xml = client
-                .get(rss_url)
-                .send()
-                .await
-                .map_err(|error| {
-                    crate::errors::AppError::Extractor(format!(
-                        "RSS fetch failed for {channel_id}: {error}"
-                    ))
-                })?
-                .text()
-                .await
-                .map_err(|error| {
-                    crate::errors::AppError::Extractor(format!(
-                        "RSS read failed for {channel_id}: {error}"
-                    ))
-                })?;
-
-            let (name, videos) = parse_rss_feed(&channel_id, &xml);
-
-            Ok::<_, crate::errors::AppError>((
-                SubscriptionRssChannel {
-                    id: channel_id,
-                    name,
-                    avatar_url: None,
-                },
-                videos,
-            ))
-        },
+        move |channel_id| fetch_rss_channel(client, channel_id),
     )
     .await;
 
