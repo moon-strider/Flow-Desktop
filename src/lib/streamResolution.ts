@@ -27,7 +27,8 @@ const MAX_CONCURRENT_PREFETCH = 2;
 type CacheEntry = { info: StreamInfo; resolvedAt: number };
 
 const cache = new Map<string, CacheEntry>();
-const inFlight = new Map<string, Promise<StreamInfo>>();
+type StreamRequest = { promise: Promise<StreamInfo>; refresh: boolean; replacement?: StreamRequest };
+const inFlight = new Map<string, StreamRequest>();
 
 const prefetchQueue: string[] = [];
 let activePrefetches = 0;
@@ -55,19 +56,36 @@ function writeCache(videoId: string, info: StreamInfo, resolvedAt = Date.now()) 
 }
 
 /** The underlying request, shared by every caller asking for the same video. */
-function requestStreamInfo(videoId: string): Promise<StreamInfo> {
+function requestStreamInfo(videoId: string, refresh = false): Promise<StreamInfo> {
   const existing = inFlight.get(videoId);
-  if (existing) return existing;
+  if (existing && (!refresh || existing.refresh)) return existing.promise;
+  if (refresh) cache.delete(videoId);
 
-  const request = getStreamInfo(videoId).then((info) => {
-    writeCache(videoId, info);
-    return info;
+  let entry: StreamRequest;
+  const currentResult = () => {
+    const next = entry.replacement ?? inFlight.get(videoId);
+    if (next && next !== entry) return next.promise;
+    const cached = readCache(videoId);
+    if (cached) return cached;
+    throw new Error("Stream request superseded");
+  };
+  const promise = getStreamInfo(videoId, refresh).then(
+    (info) => {
+      if (inFlight.get(videoId) !== entry) return currentResult();
+      writeCache(videoId, info);
+      return info;
+    },
+    (error) => {
+      if (inFlight.get(videoId) !== entry) return currentResult();
+      throw error;
+    },
+  ).finally(() => {
+    if (inFlight.get(videoId) === entry) inFlight.delete(videoId);
   });
-  const tracked = request.finally(() => {
-    if (inFlight.get(videoId) === tracked) inFlight.delete(videoId);
-  });
-  inFlight.set(videoId, tracked);
-  return tracked;
+  entry = { refresh, promise };
+  if (existing) existing.replacement = entry;
+  inFlight.set(videoId, entry);
+  return entry.promise;
 }
 
 export interface ResolveStreamOptions {
@@ -82,25 +100,19 @@ export function resolveStreamInfo(
   videoId: string,
   { timeoutMs, refresh = false }: ResolveStreamOptions = {},
 ): Promise<StreamInfo> {
-  if (refresh) invalidateStreamInfo(videoId);
-
   const cached = refresh ? null : readCache(videoId);
   if (cached) return Promise.resolve(cached);
 
-  const request = refresh
-    ? getStreamInfo(videoId, true).then((info) => {
-        writeCache(videoId, info);
-        return info;
-      })
-    : requestStreamInfo(videoId);
+  const request = requestStreamInfo(videoId, refresh);
   if (!timeoutMs) return request;
 
+  let timer: ReturnType<typeof setTimeout>;
   return Promise.race([
     request,
-    new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error("stream resolve timed out")), timeoutMs),
-    ),
-  ]);
+    new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("stream resolve timed out")), timeoutMs);
+    }),
+  ]).finally(() => clearTimeout(timer));
 }
 
 function drainPrefetchQueue() {
@@ -156,6 +168,9 @@ export function readStreamInfoEntry(videoId: string): CacheEntry | null {
 export function primeStreamInfo(videoId: string, info: StreamInfo, resolvedAt: number) {
   if (!Number.isFinite(resolvedAt)) return;
   if (Date.now() - resolvedAt >= STREAM_INFO_TTL_MS) return;
+  if (inFlight.get(videoId)?.refresh) return;
+  if ((cache.get(videoId)?.resolvedAt ?? 0) > resolvedAt) return;
+  invalidateStreamInfo(videoId);
   writeCache(videoId, info, resolvedAt);
 }
 

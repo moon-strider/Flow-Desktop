@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { usePlayerStore, usePlayerStoreApi } from "../store/usePlayerStore";
-import { invalidateStreamInfo, resolveStreamInfo } from "./streamResolution";
+import { resolveStreamInfo } from "./streamResolution";
 import { classifyPlayerError } from "./playerError";
 import { recordPlayerEvent } from "./playerDiagnostics";
 import { getOfflineStream } from "./api/downloads";
@@ -216,7 +216,8 @@ export function useVideoStream(videoId: string | undefined): VideoStream {
     if (!currentVideo || currentVideo.id !== videoId) return;
 
     const loadToken = ++loadTokenRef.current;
-    const isCurrentLoad = () => loadTokenRef.current === loadToken;
+    const isCurrentLoad = () => loadTokenRef.current === loadToken
+      && playerStore.getState().currentVideo?.id === currentVideo.id;
 
     const loadStream = async () => {
       setLoadingStream(true);
@@ -375,7 +376,8 @@ export function useVideoStream(videoId: string | undefined): VideoStream {
     };
 
     void loadStream();
-  }, [currentVideo, videoId, setIsPlaying, publishCaptions, preferredCodec, preferredQuality]);
+    return () => { loadTokenRef.current += 1; };
+  }, [currentVideo?.id, videoId, playerStore, setIsPlaying, publishCaptions, preferredCodec, preferredQuality]);
 
   const onSelectQuality = useCallback(
     (variant: StreamVariant | "auto") => {
@@ -466,7 +468,14 @@ export function useVideoStream(videoId: string | undefined): VideoStream {
 
   const onHardRetry = useCallback(() => {
     if (!currentVideo) return;
+    const loadToken = ++loadTokenRef.current;
+    const isCurrentLoad = () => loadTokenRef.current === loadToken
+      && playerStore.getState().currentVideo?.id === currentVideo.id;
+    setLoadingStream(true);
+    setResumeTime(isLive ? 0 : playerStore.getState().currentTime);
     setStreamUrl(null);
+    setDashManifestUrl(null);
+    setHlsManifestUrl(null);
     setStreamVariants([]);
     publishCaptions([]);
     setAudioTracks([]);
@@ -477,9 +486,9 @@ export function useVideoStream(videoId: string | undefined): VideoStream {
     recordPlayerEvent(`video hard retry: ${currentVideo.id}`);
     // A hard retry exists because the resolved URLs stopped working, so it has
     // to walk a fresh client ladder rather than be handed the same answer again.
-    invalidateStreamInfo(currentVideo.id);
     void resolveStreamInfo(currentVideo.id, { refresh: true })
       .then((info) => {
+        if (!isCurrentLoad()) return;
         streamInfoRef.current = info;
         attemptedModesRef.current = new Set();
         setStreamVariants(info.variants || []);
@@ -520,12 +529,16 @@ export function useVideoStream(videoId: string | undefined): VideoStream {
         }
       })
       .catch((err) => {
+        if (!isCurrentLoad()) return;
         const info = classifyPlayerError(err);
         setStreamError(info.rawMessage);
         setStreamErrorKind(info.kind);
         recordPlayerEvent(`video hard retry failed: ${info.kind} (${info.rawMessage})`);
+      })
+      .finally(() => {
+        if (isCurrentLoad()) setLoadingStream(false);
       });
-  }, [currentVideo, preferredCodec, preferredQuality, publishCaptions]);
+  }, [currentVideo, playerStore, isLive, preferredCodec, preferredQuality, publishCaptions]);
 
   return {
     streamUrl,
