@@ -15,7 +15,7 @@ use crate::streaming::sabr::selector::{CodecSupport, SabrFormat, select_formats}
 use crate::streaming::sabr::{ClientProfile, SabrSessionDescriptor};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
@@ -66,6 +66,7 @@ const LIVE_MANIFEST_CLIENTS: &[&clients::YouTubeClient] = &[
 ];
 
 /// The winning client of a ladder walk, plus what it was attested with.
+#[derive(Clone)]
 struct PlayerAttempt {
     response: Value,
     client: &'static clients::YouTubeClient,
@@ -130,6 +131,22 @@ fn invalidate_player_response(video_id: &str) {
     if let Ok(mut cache) = player_response_cache().lock() {
         cache.remove(video_id);
     }
+}
+
+struct PlayerResolution {
+    attempt: Option<PlayerAttempt>,
+    restriction: Option<Value>,
+}
+
+struct PlayerRequest {
+    refresh: bool,
+    value: tokio::sync::OnceCell<PlayerResolution>,
+    replacement: Mutex<Option<Arc<PlayerRequest>>>,
+}
+
+fn player_requests() -> &'static Mutex<HashMap<String, Weak<PlayerRequest>>> {
+    static REQUESTS: OnceLock<Mutex<HashMap<String, Weak<PlayerRequest>>>> = OnceLock::new();
+    REQUESTS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn parse_timestamp(s: &str) -> Option<u64> {
@@ -1327,29 +1344,79 @@ impl InnertubeClient {
         deferred_restriction: &mut Option<AppError>,
         refresh: bool,
     ) -> Option<PlayerAttempt> {
-        if refresh {
-            invalidate_player_response(video_id);
-        } else if let Some(cached) = cached_player_attempt(video_id) {
-            debug!(video_id = %video_id, client = cached.client.name, "Reusing in-flight player response");
-            return Some(cached);
+        if !refresh {
+            if let Some(cached) = cached_player_attempt(video_id) {
+                return Some(cached);
+            }
         }
-
-        let attempt = self
-            .try_player_ladder(
-                video_id,
-                PLAYER_CLIENT_LADDER,
-                visitor_data,
-                deferred_restriction,
-            )
-            .await;
-        if let Some(attempt) = attempt.as_ref().filter(|attempt| {
-            attempt.response["playabilityStatus"]["status"]
-                .as_str()
-                .is_some_and(|status| status.eq_ignore_ascii_case("OK"))
-        }) {
-            store_player_attempt(video_id, attempt);
+        let mut request = {
+            let mut requests = player_requests().lock().unwrap_or_else(|e| e.into_inner());
+            requests.retain(|_, request| request.strong_count() > 0);
+            let existing = requests.get(video_id).and_then(Weak::upgrade);
+            if let Some(request) = existing
+                .as_ref()
+                .filter(|request| !refresh || (request.refresh && request.value.get().is_none()))
+            {
+                Arc::clone(request)
+            } else {
+                if refresh {
+                    invalidate_player_response(video_id);
+                }
+                let request = Arc::new(PlayerRequest {
+                    refresh,
+                    value: tokio::sync::OnceCell::new(),
+                    replacement: Mutex::new(None),
+                });
+                if let Some(previous) = existing {
+                    *previous
+                        .replacement
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&request));
+                }
+                requests.insert(video_id.to_owned(), Arc::downgrade(&request));
+                request
+            }
+        };
+        loop {
+            let resolution = request
+                .value
+                .get_or_init(|| async {
+                    let mut restriction = None;
+                    let attempt = self
+                        .try_player_ladder(
+                            video_id,
+                            PLAYER_CLIENT_LADDER,
+                            visitor_data,
+                            &mut restriction,
+                        )
+                        .await;
+                    PlayerResolution {
+                        attempt,
+                        restriction,
+                    }
+                })
+                .await;
+            let requests = player_requests().lock().unwrap_or_else(|e| e.into_inner());
+            let replacement = request
+                .replacement
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            if let Some(next) = replacement {
+                drop(requests);
+                request = next;
+                continue;
+            }
+            if let Some(attempt) = resolution.attempt.as_ref().filter(|attempt| {
+                attempt.response["playabilityStatus"]["status"]
+                    .as_str()
+                    .is_some_and(|status| status.eq_ignore_ascii_case("OK"))
+            }) {
+                store_player_attempt(video_id, attempt);
+            }
+            *deferred_restriction = resolution.restriction.as_ref().map(map_playability_error);
+            return resolution.attempt.clone();
         }
-        attempt
     }
 
     /// Walk `ladder` in order, returning the first client whose player response is
@@ -1363,7 +1430,7 @@ impl InnertubeClient {
         video_id: &str,
         ladder: &[&'static clients::YouTubeClient],
         visitor_data: Option<&str>,
-        deferred_restriction: &mut Option<AppError>,
+        deferred_restriction: &mut Option<Value>,
     ) -> Option<PlayerAttempt> {
         let mut offline_attempt: Option<PlayerAttempt> = None;
         for client in ladder {
@@ -1435,7 +1502,7 @@ impl InnertubeClient {
 
             let mapped = map_playability_error(&response["playabilityStatus"]);
             if is_definitive_restriction(&mapped) {
-                deferred_restriction.get_or_insert(mapped);
+                deferred_restriction.get_or_insert_with(|| response["playabilityStatus"].clone());
             }
             warn!(
                 video_id = %video_id,
@@ -1833,7 +1900,7 @@ impl InnertubeClient {
         // A restriction seen here is discarded: the video already resolved, so a
         // missing manifest is not the reason to fail it.
         if is_live && hls_manifest_url.is_none() {
-            let mut discarded: Option<AppError> = None;
+            let mut discarded: Option<Value> = None;
             if let Some(live) = self
                 .try_player_ladder(
                     video_id_trimmed,
@@ -1981,6 +2048,7 @@ mod sabr_live_smoke {
             client: reqwest::Client::new(),
             watch_next_cache: Default::default(),
             visitor_data: std::sync::RwLock::new(None),
+            visitor_bootstrap: tokio::sync::Mutex::new(None),
         };
 
         let visitor_data = client.fetch_visitor_data().await;
@@ -2217,6 +2285,7 @@ mod sabr_client_probe {
             client: reqwest::Client::new(),
             watch_next_cache: Default::default(),
             visitor_data: std::sync::RwLock::new(None),
+            visitor_bootstrap: tokio::sync::Mutex::new(None),
         };
         // Allow injecting an externally-minted pot+visitor (e.g. from bgutils-js)
         // to test whether a *fresh, valid* pot sustains where the stale sidecar's

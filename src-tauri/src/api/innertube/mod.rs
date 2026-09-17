@@ -23,6 +23,7 @@ pub struct InnertubeClient {
     pub(crate) watch_next_cache: core::response_cache::ResponseCache,
     #[allow(dead_code)]
     pub(crate) visitor_data: std::sync::RwLock<Option<String>>,
+    pub(crate) visitor_bootstrap: tokio::sync::Mutex<Option<std::time::Instant>>,
 }
 
 impl InnertubeClient {
@@ -46,6 +47,7 @@ impl InnertubeClient {
             client,
             watch_next_cache: Default::default(),
             visitor_data: std::sync::RwLock::new(None),
+            visitor_bootstrap: tokio::sync::Mutex::new(None),
         }
     }
 }
