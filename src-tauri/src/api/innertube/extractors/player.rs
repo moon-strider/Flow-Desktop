@@ -1562,13 +1562,7 @@ impl InnertubeClient {
         let mut view_count_text = None;
         let mut published_text = None;
 
-        let mut next_payload = serde_json::json!({
-            "videoId": &id
-        });
-        if let Ok(next_res) = self
-            .post_innertube("next", &clients::WEB, &mut next_payload)
-            .await
-        {
+        if let Ok(next_res) = self.fetch_watch_next(&id).await {
             let mut primary_info = &serde_json::Value::Null;
             let mut secondary_info = &serde_json::Value::Null;
             if let Some(contents) =
@@ -1718,13 +1712,7 @@ impl InnertubeClient {
             return Err(AppError::Validation("Video ID cannot be empty".into()));
         }
 
-        let mut payload = serde_json::json!({
-            "videoId": video_id_trimmed
-        });
-
-        let next_res = self
-            .post_innertube("next", &clients::WEB, &mut payload)
-            .await?;
+        let next_res = self.fetch_watch_next(video_id_trimmed).await?;
         let mut related = Vec::new();
         collect_related_content_items(
             &next_res["contents"]["twoColumnWatchNextResults"]["secondaryResults"],
@@ -1991,6 +1979,7 @@ mod sabr_live_smoke {
             std::env::var("FLOW_SABR_VIDEO").unwrap_or_else(|_| "3RmOvxilbPM".to_string());
         let client = InnertubeClient {
             client: reqwest::Client::new(),
+            watch_next_cache: Default::default(),
             visitor_data: std::sync::RwLock::new(None),
         };
 
@@ -2226,6 +2215,7 @@ mod sabr_client_probe {
             std::env::var("FLOW_SABR_VIDEO").unwrap_or_else(|_| "3RmOvxilbPM".to_string());
         let client = InnertubeClient {
             client: reqwest::Client::new(),
+            watch_next_cache: Default::default(),
             visitor_data: std::sync::RwLock::new(None),
         };
         // Allow injecting an externally-minted pot+visitor (e.g. from bgutils-js)

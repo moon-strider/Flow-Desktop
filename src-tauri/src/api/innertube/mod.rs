@@ -20,6 +20,7 @@ pub mod parsers;
 
 pub struct InnertubeClient {
     pub(crate) client: reqwest::Client,
+    pub(crate) watch_next_cache: core::response_cache::ResponseCache,
     #[allow(dead_code)]
     pub(crate) visitor_data: std::sync::RwLock<Option<String>>,
 }
@@ -43,6 +44,7 @@ impl InnertubeClient {
             });
         Self {
             client,
+            watch_next_cache: Default::default(),
             visitor_data: std::sync::RwLock::new(None),
         }
     }

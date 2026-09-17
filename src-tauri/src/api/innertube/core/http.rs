@@ -20,6 +20,22 @@ pub fn custom_url_encode(s: &str) -> String {
 }
 
 impl InnertubeClient {
+    pub(crate) async fn fetch_watch_next(
+        &self,
+        video_id: &str,
+    ) -> AppResult<std::sync::Arc<Value>> {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            self.watch_next_cache.get_or_fetch(video_id, || async {
+                let mut payload = serde_json::json!({ "videoId": video_id });
+                self.post_innertube("next", &clients::WEB, &mut payload)
+                    .await
+            }),
+        )
+        .await
+        .map_err(|_| AppError::Extractor("Watch metadata request timed out".into()))?
+    }
+
     /// POST to the main-site InnerTube API as `client`.
     ///
     /// The client's User-Agent, numeric id and version all come from the one

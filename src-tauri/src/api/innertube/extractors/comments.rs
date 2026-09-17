@@ -518,21 +518,14 @@ impl InnertubeClient {
             return Err(AppError::Validation("Video ID cannot be empty".into()));
         }
 
-        let mut payload = if let Some(ref token) = page_token {
-            serde_json::json!({
-                "continuation": token
-            })
-        } else {
-            serde_json::json!({
-                "videoId": video_id_trimmed
-            })
-        };
-
         debug!(video_id = %video_id_trimmed, has_page_token = page_token.is_some(), "[get_comments] Starting comments fetch");
 
-        let res = self
-            .post_innertube("next", &clients::WEB, &mut payload)
-            .await?;
+        let res = if let Some(ref token) = page_token {
+            let mut payload = serde_json::json!({ "continuation": token });
+            std::sync::Arc::new(self.post_innertube("next", &clients::WEB, &mut payload).await?)
+        } else {
+            self.fetch_watch_next(video_id_trimmed).await?
+        };
         let mut comments_res = parse_comments_json(&res);
 
         debug!(
