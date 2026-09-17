@@ -157,7 +157,7 @@ function VideoCardComponent({
     isChannel || video.channelAvatarUrl ? null : channelId || null,
   );
   const resolvedAvatarUrl = useProxiedImageUrl(upgradeAvatarUrl(video.channelAvatarUrl || hookAvatarUrl));
-  const channelCardAvatarUrl = useProxiedImageUrl(upgradeAvatarUrl(video.thumbnailUrl));
+  const channelCardAvatarUrl = useProxiedImageUrl(isChannel ? upgradeAvatarUrl(video.thumbnailUrl) : null);
   // Cached and de-duplicated across cards and remounts by the hook; this used to
   // be a bare `getDeArrowOverride` in an effect, one IPC per card, every mount.
   const dearrowOverride = useDeArrowOverride(isChannel ? null : video.id, dearrowEnabled);

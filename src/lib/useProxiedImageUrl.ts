@@ -11,25 +11,14 @@ function isLoopbackUrl(url: string): boolean {
 
 export function useProxiedImageUrl(src: string | null | undefined): string | undefined {
   const normalized = src?.trim();
-  const [proxied, setProxied] = useState<string | undefined>(() => {
-    if (!normalized) return undefined;
-    if (isLoopbackUrl(normalized)) return normalized;
-    return proxyCache.get(normalized);
-  });
+  const passthrough = !!normalized && (isLoopbackUrl(normalized) || !/^https?:\/\//i.test(normalized));
+  const [resolved, setResolved] = useState<{ source: string; url: string } | null>(null);
 
   useEffect(() => {
-    if (!normalized) {
-      setProxied(undefined);
-      return;
-    }
-    if (isLoopbackUrl(normalized)) {
-      setProxied(normalized);
-      return;
-    }
+    if (!normalized || passthrough) return;
 
     const cached = proxyCache.get(normalized);
     if (cached) {
-      setProxied(cached);
       return;
     }
 
@@ -39,10 +28,10 @@ export function useProxiedImageUrl(src: string | null | undefined): string | und
     request
       .then((url) => {
         proxyCache.set(normalized, url);
-        if (active) setProxied(url);
+        if (active) setResolved({ source: normalized, url });
       })
       .catch(() => {
-        if (active) setProxied(normalized);
+        if (active) setResolved({ source: normalized, url: normalized });
       })
       .finally(() => {
         if (pending.get(normalized) === request) {
@@ -53,7 +42,9 @@ export function useProxiedImageUrl(src: string | null | undefined): string | und
     return () => {
       active = false;
     };
-  }, [normalized]);
+  }, [normalized, passthrough]);
 
-  return proxied ?? normalized;
+  if (!normalized) return undefined;
+  if (passthrough) return normalized;
+  return proxyCache.get(normalized) ?? (resolved?.source === normalized ? resolved.url : undefined);
 }
