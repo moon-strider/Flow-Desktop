@@ -31,6 +31,7 @@ import { SponsorBlockSubmitDialog } from "./SponsorBlockSubmitDialog";
 import { SponsorBlockIcon } from "../ui/SponsorBlockIcon";
 import { sponsorBlockCategoryLabel } from "../../lib/sponsorBlockCategories";
 import { getString } from "../../lib/i18n/index";
+import { useTabContext } from "../../lib/tabContext";
 import { Slider } from "../ui/Slider";
 import { videoCodecLabel } from "../../lib/settings/playerRuntime";
 
@@ -167,6 +168,7 @@ export const FlowPlayerControls: React.FC<FlowPlayerControlsProps> = ({
   activeQualityLabel,
 }) => {
   const playerStore = usePlayerStoreApi();
+  const tab = useTabContext();
   const {
     isPlaying,
     currentVideo,
@@ -250,9 +252,17 @@ export const FlowPlayerControls: React.FC<FlowPlayerControlsProps> = ({
   }, [chapters, duration, isLive]);
 
   useEffect(() => {
-    let animId: number;
+    if (!(tab.active || tab.ownsPip) || !shouldShowControls) return;
+    const root = containerRef.current;
+    const video = root?.querySelector("video");
+    if (!root || !video) return;
+    const progressFills = root.querySelectorAll<HTMLElement>(".chapter-progress-fill");
+    const bufferedFills = root.querySelectorAll<HTMLElement>(".chapter-buffered-fill");
+    let animId: number | null = null;
+    let lastTimeText = "";
     const updateProgress = () => {
-      const video = containerRef.current?.querySelector("video");
+      animId = null;
+      if (document.hidden) return;
       if (video) {
         const cur = video.currentTime;
 
@@ -262,16 +272,19 @@ export const FlowPlayerControls: React.FC<FlowPlayerControlsProps> = ({
           const win = Math.max(1, end - start);
           const livePct = Math.min(100, Math.max(0, ((cur - start) / win) * 100));
           if (progressBarRef.current) progressBarRef.current.style.width = `${livePct}%`;
-          containerRef.current
-            ?.querySelectorAll(".chapter-progress-fill, .chapter-buffered-fill")
-            .forEach((fill) => ((fill as HTMLElement).style.width = `${livePct}%`));
+          progressFills.forEach((fill) => { fill.style.width = `${livePct}%`; });
+          bufferedFills.forEach((fill) => { fill.style.width = `${livePct}%`; });
           if (playheadRef.current) playheadRef.current.style.left = `${livePct}%`;
           if (chapterPillRef.current) chapterPillRef.current.style.display = "none";
           if (timeTextRef.current) {
             const offset = parseFloat(video.dataset.liveOffset || "0");
-            timeTextRef.current.textContent = formatTime(cur + offset);
+            const text = formatTime(cur + offset);
+            if (text !== lastTimeText) {
+              timeTextRef.current.textContent = text;
+              lastTimeText = text;
+            }
           }
-          animId = requestAnimationFrame(updateProgress);
+          if (isPlaying && !video.paused) animId = requestAnimationFrame(updateProgress);
           return;
         }
 
@@ -283,7 +296,6 @@ export const FlowPlayerControls: React.FC<FlowPlayerControlsProps> = ({
         }
 
         // Update split segments progress fills
-        const progressFills = containerRef.current?.querySelectorAll(".chapter-progress-fill");
         progressFills?.forEach((fill) => {
           const start = parseFloat(fill.getAttribute("data-start") || "0");
           const end = parseFloat(fill.getAttribute("data-end") || "0");
@@ -295,7 +307,6 @@ export const FlowPlayerControls: React.FC<FlowPlayerControlsProps> = ({
         });
 
         // Update split segments buffered fills
-        const bufferedFills = containerRef.current?.querySelectorAll(".chapter-buffered-fill");
         const bufferedTime = (bufferedPct / 100) * dur;
         bufferedFills?.forEach((fill) => {
           const start = parseFloat(fill.getAttribute("data-start") || "0");
@@ -316,7 +327,11 @@ export const FlowPlayerControls: React.FC<FlowPlayerControlsProps> = ({
         );
 
         if (timeTextRef.current) {
-          timeTextRef.current.innerHTML = `${formatTime(cur)} <span class="text-chrome-zinc-400">/</span> ${formatTime(dur)}`;
+          const text = `${formatTime(cur)} <span class="text-chrome-zinc-400">/</span> ${formatTime(dur)}`;
+          if (text !== lastTimeText) {
+            timeTextRef.current.innerHTML = text;
+            lastTimeText = text;
+          }
         }
 
         if (chapterPillRef.current) {
@@ -331,12 +346,21 @@ export const FlowPlayerControls: React.FC<FlowPlayerControlsProps> = ({
           }
         }
       }
-      animId = requestAnimationFrame(updateProgress);
+      if (isPlaying && !video.paused) animId = requestAnimationFrame(updateProgress);
     };
-
-    animId = requestAnimationFrame(updateProgress);
-    return () => cancelAnimationFrame(animId);
-  }, [containerRef, duration, segments, bufferedPct, isLive]);
+    const schedule = () => {
+      if (!document.hidden && animId === null) animId = requestAnimationFrame(updateProgress);
+    };
+    const events = ["timeupdate", "seeked", "loadedmetadata", "durationchange", "progress", "play", "pause"];
+    events.forEach((event) => video.addEventListener(event, schedule));
+    document.addEventListener("visibilitychange", schedule);
+    schedule();
+    return () => {
+      if (animId !== null) cancelAnimationFrame(animId);
+      events.forEach((event) => video.removeEventListener(event, schedule));
+      document.removeEventListener("visibilitychange", schedule);
+    };
+  }, [containerRef, duration, segments, bufferedPct, isLive, isPlaying, shouldShowControls, tab.active, tab.ownsPip]);
 
   const progressPct =
     duration > 0

@@ -1,6 +1,7 @@
 import React, { useEffect, useRef } from "react";
 import { FastForward, Pause, Play, Rewind, SkipBack, SkipForward } from "lucide-react";
 import { usePlayerStore } from "../../store/usePlayerStore";
+import { useTabContext } from "../../lib/tabContext";
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
@@ -31,6 +32,7 @@ export const MiniPlayerControls: React.FC<MiniPlayerControlsProps> = ({
   showSkipControls,
   showNextPrevControls,
 }) => {
+  const tab = useTabContext();
   const playNext = usePlayerStore((s) => s.playNext);
   const playPrevious = usePlayerStore((s) => s.playPrevious);
 
@@ -39,19 +41,33 @@ export const MiniPlayerControls: React.FC<MiniPlayerControlsProps> = ({
   const scrubbingRef = useRef(false);
 
   useEffect(() => {
-    let raf = 0;
+    if (!(tab.active || tab.ownsPip) || !shouldShowControls) return;
+    const video = containerRef.current?.querySelector("video");
+    if (!video) return;
+    let raf: number | null = null;
     const tick = () => {
-      const video = containerRef.current?.querySelector("video");
+      raf = null;
+      if (document.hidden) return;
       if (video && fillRef.current) {
         const dur = video.duration || duration || 0;
         const pct = dur > 0 ? clamp((video.currentTime / dur) * 100, 0, 100) : 0;
         fillRef.current.style.width = `${pct}%`;
       }
-      raf = requestAnimationFrame(tick);
+      if (isPlaying && !video.paused) raf = requestAnimationFrame(tick);
     };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, [containerRef, duration]);
+    const schedule = () => {
+      if (!document.hidden && raf === null) raf = requestAnimationFrame(tick);
+    };
+    const events = ["timeupdate", "seeked", "loadedmetadata", "durationchange", "play", "pause"];
+    events.forEach((event) => video.addEventListener(event, schedule));
+    document.addEventListener("visibilitychange", schedule);
+    schedule();
+    return () => {
+      if (raf !== null) cancelAnimationFrame(raf);
+      events.forEach((event) => video.removeEventListener(event, schedule));
+      document.removeEventListener("visibilitychange", schedule);
+    };
+  }, [containerRef, duration, isPlaying, shouldShowControls, tab.active, tab.ownsPip]);
 
   const seekFromClientX = (clientX: number) => {
     const track = trackRef.current;
