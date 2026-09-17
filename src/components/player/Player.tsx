@@ -1,3 +1,4 @@
+import { useShallow } from "zustand/react/shallow";
 import { useTabContext } from "../../lib/tabContext";
 import { useTabsStore } from "../../store/useTabsStore";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -392,7 +393,6 @@ export const Player: React.FC<PlayerProps> = ({
     setMuted,
     playbackRate,
     setPlaybackRate,
-    currentTime,
     duration,
     setCurrentTime,
     setDuration,
@@ -406,7 +406,29 @@ export const Player: React.FC<PlayerProps> = ({
     isVideoFullscreen: isFullscreen,
     setIsVideoFullscreen: setIsFullscreen,
     setIsVideoFullscreenTransitioning,
-  } = usePlayerStore();
+  } = usePlayerStore(useShallow((state) => ({
+    isPlaying: state.isPlaying,
+    setIsPlaying: state.setIsPlaying,
+    volume: state.volume,
+    setVolume: state.setVolume,
+    muted: state.muted,
+    setMuted: state.setMuted,
+    playbackRate: state.playbackRate,
+    setPlaybackRate: state.setPlaybackRate,
+    duration: state.duration,
+    setCurrentTime: state.setCurrentTime,
+    setDuration: state.setDuration,
+    playNext: state.playNext,
+    isTheaterMode: state.isTheaterMode,
+    setIsTheaterMode: state.setIsTheaterMode,
+    sponsorBlockSegments: state.sponsorBlockSegments,
+    videoPlayerMode: state.videoPlayerMode,
+    enterVideoPip: state.enterVideoPip,
+    expandVideoPlayer: state.expandVideoPlayer,
+    isVideoFullscreen: state.isVideoFullscreen,
+    setIsVideoFullscreen: state.setIsVideoFullscreen,
+    setIsVideoFullscreenTransitioning: state.setIsVideoFullscreenTransitioning,
+  })));
 
   usePersistedPlayerVolume();
 
@@ -1214,9 +1236,9 @@ export const Player: React.FC<PlayerProps> = ({
   }, [duration, setCurrentTime]);
 
   const seekBy = useCallback((delta: number) => {
-    seekTo(currentTime + delta);
+    seekTo((videoRef.current?.currentTime ?? playerStore.getState().currentTime) + delta);
     showSeekFeedback(delta > 0 ? "forward" : "backward", Math.abs(delta));
-  }, [currentTime, seekTo, showSeekFeedback]);
+  }, [playerStore, seekTo, showSeekFeedback]);
 
 
   useEffect(() => {
@@ -1294,7 +1316,7 @@ export const Player: React.FC<PlayerProps> = ({
   const jumpChapter = useCallback((direction: 1 | -1) => {
     if (chapters.length === 0) return;
     const video = videoRef.current;
-    const time = video?.currentTime ?? currentTime;
+    const time = video?.currentTime ?? playerStore.getState().currentTime;
     if (direction === 1) {
       const next = chapters.find((chapter) => chapter.startSeconds > time + 0.5);
       seekTo(next ? next.startSeconds : video?.duration ?? duration);
@@ -1302,7 +1324,7 @@ export const Player: React.FC<PlayerProps> = ({
     }
     const passed = chapters.filter((chapter) => chapter.startSeconds < time - 2);
     seekTo(passed.length > 0 ? passed[passed.length - 1]!.startSeconds : 0);
-  }, [chapters, currentTime, duration, seekTo]);
+  }, [chapters, playerStore, duration, seekTo]);
 
   const windowFullscreenControllerRef = useRef<WindowFullscreenController | null>(null);
   if (!windowFullscreenControllerRef.current) {
@@ -2249,7 +2271,6 @@ export const Player: React.FC<PlayerProps> = ({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [
     tab.active,
-    currentTime,
     isFullscreen,
     isTheaterMode,
     muted,
@@ -2585,7 +2606,6 @@ export const Player: React.FC<PlayerProps> = ({
         src={mediaIdentity || undefined}
         isPlaying={isPlaying}
         playbackRate={playbackRate}
-        currentTime={currentTime}
         duration={duration}
         seekFeedback={seekFeedback}
         volumeFeedback={volumeFeedback}
@@ -2640,7 +2660,6 @@ export const Player: React.FC<PlayerProps> = ({
       <SubtitleOverlay
         captions={captions}
         selectedCaptionId={selectedCaptionId}
-        currentTime={currentTime}
         shouldShowControls={shouldShowControls}
       />
 

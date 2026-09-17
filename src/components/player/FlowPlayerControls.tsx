@@ -1,3 +1,4 @@
+import { useShallow } from "zustand/react/shallow";
 import React, { useState, useEffect, useRef } from "react";
 import {
   AudioLines,
@@ -186,7 +187,24 @@ export const FlowPlayerControls: React.FC<FlowPlayerControlsProps> = ({
     setIsChaptersPanelOpen,
     isQueuePanelOpen,
     setIsQueuePanelOpen,
-  } = usePlayerStore();
+  } = usePlayerStore(useShallow((state) => ({
+    isPlaying: state.isPlaying,
+    currentVideo: state.currentVideo,
+    volume: state.volume,
+    setVolume: state.setVolume,
+    playbackRate: state.playbackRate,
+    setPlaybackRate: state.setPlaybackRate,
+    duration: state.duration,
+    playNext: state.playNext,
+    playPrevious: state.playPrevious,
+    isTheaterMode: state.isTheaterMode,
+    setIsTheaterMode: state.setIsTheaterMode,
+    sponsorBlockSegments: state.sponsorBlockSegments,
+    isChaptersPanelOpen: state.isChaptersPanelOpen,
+    setIsChaptersPanelOpen: state.setIsChaptersPanelOpen,
+    isQueuePanelOpen: state.isQueuePanelOpen,
+    setIsQueuePanelOpen: state.setIsQueuePanelOpen,
+  })));
 
   const { sponsorBlockColors, sponsorBlockEnabled, sbSubmitEnabled } = useSettingsStore();
   const selectPlaybackRate = onSelectPlaybackRate ?? setPlaybackRate;

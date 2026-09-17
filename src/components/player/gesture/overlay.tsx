@@ -13,7 +13,7 @@ import {
   Volume2,
   VolumeX,
 } from "lucide-react";
-import type { PlaybackRate } from "../../../store/usePlayerStore";
+import { usePlayerStore, usePlayerStoreApi, type PlaybackRate } from "../../../store/usePlayerStore";
 import { copyText } from "../../../lib/clipboard";
 import { StatsForNerds } from "../StatsForNerds";
 
@@ -45,7 +45,6 @@ type PlayerGestureOverlayProps = {
   src?: string | null;
   isPlaying: boolean;
   playbackRate: PlaybackRate;
-  currentTime: number;
   duration: number;
   seekFeedback: PlayerSeekFeedback | null;
   volumeFeedback: PlayerVolumeFeedback | null;
@@ -86,7 +85,6 @@ export const PlayerGestureOverlay: React.FC<PlayerGestureOverlayProps> = ({
   src,
   isPlaying,
   playbackRate,
-  currentTime,
   duration,
   seekFeedback,
   volumeFeedback,
@@ -110,6 +108,8 @@ export const PlayerGestureOverlay: React.FC<PlayerGestureOverlayProps> = ({
   const [copiedLabel, setCopiedLabel] = useState<string | null>(null);
   const [isBoosting, setIsBoosting] = useState(false);
   const [statsVisible, setStatsVisible] = useState(false);
+  const playerStore = usePlayerStoreApi();
+  const currentTime = usePlayerStore((state) => statsVisible ? state.currentTime : 0);
   const centerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -150,7 +150,7 @@ export const PlayerGestureOverlay: React.FC<PlayerGestureOverlayProps> = ({
   const getCurrentUrl = (includeTime: boolean) => {
     const url = new URL(window.location.href);
     if (includeTime) {
-      url.searchParams.set("t", `${Math.max(0, Math.floor(currentTime))}`);
+      url.searchParams.set("t", `${Math.max(0, Math.floor(videoRef.current?.currentTime ?? playerStore.getState().currentTime))}`);
     } else {
       url.searchParams.delete("t");
     }
@@ -250,7 +250,7 @@ export const PlayerGestureOverlay: React.FC<PlayerGestureOverlayProps> = ({
     await copyText(JSON.stringify({
       title,
       src,
-      currentTime: formatTime(currentTime),
+      currentTime: formatTime(video?.currentTime ?? playerStore.getState().currentTime),
       duration: formatTime(duration),
       playbackRate,
       readyState: video?.readyState,

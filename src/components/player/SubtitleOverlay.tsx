@@ -18,7 +18,7 @@ export type CaptionCue = {
 interface SubtitleOverlayProps {
   captions: CaptionTrack[];
   selectedCaptionId: string;
-  currentTime: number;
+  currentTime?: number;
   shouldShowControls: boolean;
 }
 
@@ -243,6 +243,7 @@ export const SubtitleOverlay: React.FC<SubtitleOverlayProps> = ({
   currentTime,
   shouldShowControls,
 }) => {
+  const playbackTime = usePlayerStore((state) => currentTime ?? (selectedCaptionId === "off" ? 0 : state.currentTime));
   const [captionCues, setCaptionCues] = useState<CaptionCue[]>([]);
   const [trackFailed, setTrackFailed] = useState(false);
   
@@ -306,7 +307,7 @@ export const SubtitleOverlay: React.FC<SubtitleOverlayProps> = ({
   const activeCue =
     selectedCaptionId === "off"
       ? null
-      : findActiveCue(captionCues, currentTime);
+      : findActiveCue(captionCues, playbackTime);
 
 
   if (!activeCue && !trackFailed) return null;
